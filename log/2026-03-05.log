@@ -7,3 +7,4 @@
 [2026-03-05 09:37:56] [CACHE HIT] [REDIRECT] | ORIG: 554887 bytes -> NEW: 183495 bytes | SAVED: 362.69 KB (66.93%) | URL: /thubms/about.jpg?w=1200 | PARAMS: {"name":"about.jpg","w":"1200"}
 [2026-03-05 10:04:50] [PROCESSED] [REDIRECT] | ORIG: 554887 bytes -> NEW: 206660 bytes | SAVED: 340.07 KB (62.76%) | URL: /thubms/about.jpg?w=1200&fm=webp | PARAMS: {"name":"about.jpg","w":"1200","fm":"webp"}
 [2026-03-05 10:07:32] [CACHE HIT] [REDIRECT] | ORIG: 554887 bytes -> NEW: 33854 bytes | SAVED: 508.82 KB (93.90%) | URL: /thubms/about.jpg?w=400&fm=webp | PARAMS: {"name":"about.jpg","w":"400","fm":"webp"}
+[2026-03-05 10:36:10] [PROCESSED] [REDIRECT] | ORIG: 554887 bytes -> NEW: 32150 bytes | SAVED: 510.49 KB (94.21%) | URL: /thubms/about.jpg?w=400 | PARAMS: {"name":"about.jpg","w":"400"}

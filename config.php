@@ -9,6 +9,16 @@ return [
     'avif_quality' => 75,      // 1–100
     'png_compression' => 9,       // 0–9 (9 = максимум для минимального веса)
 
+    // === Оптимизация PNG ===
+    'png_indexed' => true,             // Умный indexed PNG: включается для маленьких изображений (256 цветов, -30..70%)
+    'png_indexed_threshold' => 200,    // px: ширина ниже которой применяется indexed; 0 = всегда
+
+    // === Оптимизация JPEG ===
+    'jpeg_progressive' => true,        // Прогрессивный JPEG: картинка загружается плавно (размер не меняется)
+
+    // === Оптимизация WebP ===
+    'webp_strip_metadata' => true,     // Удалять метаданные (EXIF/XMP) из WebP — экономит 1–5 KB
+
     // === Режимы по умолчанию ===
     'default_mode' => 'fit',    // fit, cover, resize
     'default_gravity' => 'center', // top, bottom, left, right, center...

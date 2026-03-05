@@ -157,17 +157,29 @@ class ResizeService
             case 'png':
                 // PNG — всегда без потерь; compression влияет только на размер файла
                 $compression = $lossless ? 0 : (int) ($this->config['png_compression'] ?? 9);
-                $image->toPng(compression: $compression)->save($destPath);
+
+                // Умный indexed-режим: включается если ширина <= порога (0 = всегда)
+                $pngIndexed = $this->config['png_indexed'] ?? false;
+                $pngThreshold = (int) ($this->config['png_indexed_threshold'] ?? 200);
+                $useIndexed = $pngIndexed && !$lossless
+                    && ($pngThreshold === 0 || $image->width() <= $pngThreshold);
+
+                $image->toPng(
+                    compression: $compression,
+                    indexed: $useIndexed
+                )->save($destPath);
                 break;
 
             case 'webp':
                 $quality = $lossless ? 100 : (int) ($this->config['webp_quality'] ?? 85);
-                $image->toWebp($quality)->save($destPath);
+                // webp_strip_metadata: удаляем EXIF/XMP (экономит 1–5 KB)
+                $stripMeta = $this->config['webp_strip_metadata'] ?? true;
+                $image->toWebp(quality: $quality, strip: $stripMeta)->save($destPath);
                 break;
 
             case 'avif':
                 $quality = $lossless ? 100 : (int) ($this->config['avif_quality'] ?? 75);
-                $image->toAvif($quality)->save($destPath);
+                $image->toAvif(quality: $quality)->save($destPath);
                 break;
 
             case 'gif':
@@ -178,7 +190,13 @@ class ResizeService
             case 'jpeg':
             default:
                 $quality = $lossless ? 100 : (int) ($this->config['jpeg_quality'] ?? 82);
-                $image->toJpeg($quality)->save($destPath);
+                // jpeg_progressive: плавная загрузка сверху вниз
+                $progressive = $this->config['jpeg_progressive'] ?? false;
+                // GD автоматически удаляет EXIF при перекодировании
+                $image->toJpeg(
+                    quality: $quality,
+                    progressive: $progressive
+                )->save($destPath);
                 break;
         }
     }

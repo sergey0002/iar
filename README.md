@@ -2,7 +2,7 @@
 
 <p align="center">
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
-  <a href="https://php.net"><img src="https://img.shields.io/badge/php-%3E%3D7.4-8892bf.svg" alt="PHP Version"></a>
+  <a href="https://php.net"><img src="https://img.shields.io/badge/php-%3E%3D8.1-8892bf.svg" alt="PHP Version"></a>
   <a href="https://github.com/Intervention/image"><img src="https://img.shields.io/badge/Intervention%20Image-v3-blue.svg" alt="Intervention Image v3"></a>
   <img src="https://img.shields.io/badge/WebP%20%2F%20AVIF-Auto-green.svg" alt="WebP AVIF Auto">
 </p>
@@ -18,7 +18,7 @@
 
 | | Advantage |
 |:---:|:---|
-| ⚡ | **Blazing Fast** — Transparent caching + ETag support. Repeat requests are served in milliseconds, like static files. |
+| ⚡ | **Blazing Fast** — Transparent caching + ETag support + optional 302/301 redirect to static cache files. Repeat requests are served in milliseconds, like static files. |
 | 🛡️ | **Secure by Default** — Hardened against Path Traversal and DoS. Whitelisted extensions and strict path resolution. |
 | 📦 | **Zero System Dependencies** — Only PHP + GD required. No `imagemagick` or global `composer` needed on the server. |
 | 🚀 | **Modern Formats** — Automatically serves WebP or AVIF if the browser supports it (`Accept` header). |
@@ -71,7 +71,7 @@ composer install --no-dev --optimize-autoloader
 > The `cache/` folder is created **automatically** on the first request. Ensure the PHP process has write permissions in the `iar/` directory.
 
 > [!TIP]
-> You can **rename** the `iar/` folder to anything you like — everything will continue to work. Just update `RewriteBase` in `.htaccess`.
+> You can **rename** the `iar/` folder to anything you like — everything will continue to work. The `.htaccess` rules are relative and portable.
 
 ---
 
@@ -221,20 +221,37 @@ return [
     'avif_quality'    => 75,     // AVIF: 1–100
     'png_compression' => 9,      // PNG zlib: 0–9 (does not affect pixel quality)
 
-    // === Default Modes ===
-    'default_mode'    => 'fit',     // fit | cover | resize
-    'default_gravity' => 'center',  // center | top | bottom | left | right | ...
+    // === PNG Optimization ===
+    'png_indexed'           => true,  // Smart indexed PNG for small images (saves 30–70%)
+    'png_indexed_threshold' => 200,   // px width threshold; 0 = always indexed
 
-    // === Optimization ===
-    'lossless'           => false,   // true = maximum quality mode
-    'auto_format'        => true,    // Auto-select WebP/AVIF by Accept header
-    'cache_invalidation' => 'mtime', // 'mtime' (by date) | 'off' (eternal cache)
-    'cache_auto_clean'   => true,    // Delete old cache versions on source update
+    // === JPEG Optimization ===
+    'jpeg_progressive' => true,       // Progressive JPEG (smooth top-to-bottom loading)
+
+    // === WebP Optimization ===
+    'webp_strip_metadata' => true,    // Strip EXIF/XMP metadata from WebP (saves 1–5 KB)
+
+    // === Default Modes ===
+    'default_mode'    => 'fit',       // fit | cover | resize
+    'default_gravity' => 'center',    // center | top | bottom | left | right | ...
+
+    // === Optimization & Caching ===
+    'lossless'           => false,    // true = maximum quality mode (quality 100)
+    'auto_format'        => true,     // Auto-select WebP/AVIF by Accept header
+    'cache_invalidation' => 'mtime',  // 'mtime' (by source mtime) | 'off' (eternal cache)
+    'cache_auto_clean'   => true,     // Delete old cache versions on source update
+    'redirect_to_cache'  => true,     // true = 302/301 redirect to cached file (fastest)
+    'static_mode'        => false,    // true = skip mtime check, serve cache blindly (301)
+    'disable_cache'      => false,    // true = disable cache (always regenerate, for dev)
 
     // === Security & Paths ===
     'images_base_dir'    => realpath(__DIR__ . '/../'),
     'allowed_extensions' => ['jpg', 'jpeg', 'gif', 'png', 'webp', 'avif', 'svg'],
     'cache_dir'          => __DIR__ . '/cache',
+
+    // === Logging ===
+    'logging' => true,
+    'log_dir' => __DIR__ . '/log',
 ];
 ```
 
@@ -242,20 +259,37 @@ return [
 
 | Key | Value | Description |
 | :--- | :---: | :--- |
-| `max_width` / `max_height` | int, px | Upper size limit. Values of `w`/`h` exceeding the limit are clamped. **DoS protection.** |
+| `max_width` / `max_height` | int, px | Upper size limit. Values exceeding the limit are clamped. **DoS protection.** |
 | `jpeg_quality` | 1–100 | JPEG quality. `82` — visually lossless with optimal file size. |
 | `webp_quality` | 1–100 | WebP lossy quality. `85` — recommended. |
 | `avif_quality` | 1–100 | AVIF quality. `75` — excellent balance of quality and size. |
-| `png_compression` | 0–9 | Level of zlib compression for PNG. **Does not affect pixel quality** (lossless). `9` = smallest file size. |
+| `png_compression` | 0–9 | Level of zlib compression for PNG. **Does not affect pixel quality** (lossless). `9` = smallest file. |
+| `png_indexed` | bool | Smart indexed color (256-color palette) for PNG. Saves 30–70% on icons/flat-art. |
+| `png_indexed_threshold` | px | Width limit for smart indexed mode; images wider than this stay true-color. `0` = always indexed. |
+| `jpeg_progressive` | bool | Progressive JPEG encoding — image loads smoothly top-to-bottom in browsers. |
+| `webp_strip_metadata` | bool | Strip EXIF/XMP metadata from WebP output. Saves 1–5 KB per file. |
 | `default_mode` | `fit` / `cover` / `resize` | Default resize mode when `m` is not provided in the URL. |
 | `default_gravity` | `center` / ... | Default crop anchor for `cover` mode when `g` is not provided. |
-| `lossless` | bool | `true` = maximum quality for all formats (PNG lossless, JPEG/WebP/AVIF quality=100). |
+| `lossless` | bool | `true` = maximum quality for all formats (JPEG/WebP/AVIF quality=100, PNG no compression). |
 | `auto_format` | bool | Automatically serve WebP / AVIF if the browser supports it via `Accept`. |
 | `cache_invalidation` | `mtime` / `off` | `mtime` — regenerate cache when source file changes. `off` — eternal cache. |
 | `cache_auto_clean` | bool | Delete old cache versions when the source file is updated. |
+| `redirect_to_cache` | bool | `true` = PHP issues a 302/301 redirect to the cached static file. `false` = stream via PHP. |
+| `static_mode` | bool | `true` = skip `filemtime` checks entirely (maximum I/O savings). Uses 301 redirect. Best for assets that never change. |
+| `disable_cache` | bool | `true` = disable all caching (always regenerate). Sends `no-cache` headers. **For development only.** |
 | `images_base_dir` | path | Root directory for originals. Requests outside this directory return 403. |
 | `allowed_extensions` | array | Whitelist of allowed extensions. Everything else returns 403. |
 | `cache_dir` | path | Folder for storing cached thumbnails. Created automatically. |
+| `logging` | bool | Enable request logging to the `log/` directory. |
+| `log_dir` | path | Directory for log files (one file per day). |
+
+### Cache Mode Comparison
+
+| Mode | Config | Behavior | Best For |
+| :--- | :--- | :--- | :--- |
+| **Normal** | defaults | mtime check + 302 redirect | Changing assets |
+| **Static** | `static_mode: true` | No mtime check + 301 redirect | Immutable assets |
+| **Dev** | `disable_cache: true` | Always regenerate, no redirect | Development |
 
 ---
 
@@ -268,12 +302,19 @@ return [
 | **Edge Crop** | Crop px or % from any edge before processing (`ct`, `cr`, `cb`, `cl`). |
 | **Auto WebP/AVIF** | Transparent conversion to modern formats without changing the URL. |
 | **Transparent Caching** | First request = processing. All subsequent = instant from cache. |
+| **Cache Redirect** | PHP redirects to the static cached file for Apache to serve directly. |
+| **Static Mode** | Zero I/O overhead mode for immutable assets. |
+| **Dev Mode** | `disable_cache` for always-fresh results during development. |
 | **Cache Invalidation** | Automatic when the source file changes (by `mtime`). |
 | **ETag / 304** | Full browser caching protocol support. |
+| **Progressive JPEG** | Smooth top-to-bottom loading experience. |
+| **Smart PNG Indexed** | Automatic palette mode for small PNG (30–70% savings). |
+| **WebP Metadata Strip** | Remove EXIF/XMP from output WebP files. |
 | **SVG Support** | SVG is passed through as-is (or rasterized via Imagick). |
 | **Path Traversal Protection** | Strict path verification — impossible to escape `images_base_dir`. |
 | **DoS Protection** | `max_width` / `max_height` limits prevent generating massive images. |
 | **Lossless Mode** | Global maximum quality with a single config flag. |
+| **Logging** | Per-day log files with cache status, redirect type, and size savings. |
 
 ---
 
@@ -281,7 +322,7 @@ return [
 
 | Component | Minimum | Recommended |
 | :--- | :---: | :---: |
-| PHP | ≥ 7.4 | 8.2+ |
+| PHP | ≥ 8.1 | 8.2+ |
 | PHP GD extension | ✅ Required | + WebP + AVIF support |
 | Apache `mod_rewrite` | — | ✅ For clean URLs |
 | `php-imagick` | — | ✅ For SVG → raster |

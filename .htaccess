@@ -1,0 +1,35 @@
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteBase /iar/
+
+    # Прямая отдача файлов из cache/ без PHP (ускорение cache-hit запросов)
+    RewriteCond %{REQUEST_URI} ^/iar/cache/
+    RewriteCond %{REQUEST_FILENAME} -f
+    RewriteRule ^ - [L]
+
+    # Все запросы к изображениям (кроме кеша) — через index.php. 
+    # Это позволяет ресайзить даже СУЩЕСТВУЮЩИЕ файлы и делать авто-формат (WebP/AVIF).
+    RewriteCond %{REQUEST_URI} !^/iar/cache/
+    RewriteRule ^(.*)\.(jpg|jpeg|png|gif|webp|avif|svg)$ index.php?name=$1.$2 [L,QSA,NC]
+
+</IfModule>
+
+# ============================================================
+# Безопасность: блокировка прямого доступа к PHP-скриптам
+# кроме index.php (точки входа)
+# ============================================================
+<FilesMatch "^(download_composer|resize_class)\.php$">
+    Order deny,allow
+    Deny from all
+</FilesMatch>
+
+# ============================================================
+# SEC-07: SVG в cache/ — Content-Security-Policy чтобы запретить
+# скрипты в SVG-файлах при прямом доступе браузера
+# ============================================================
+<IfModule mod_headers.c>
+    <FilesMatch "\.svg$">
+        Header set Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'"
+        Header set X-Content-Type-Options "nosniff"
+    </FilesMatch>
+</IfModule>

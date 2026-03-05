@@ -1,0 +1,19 @@
+# thubms — Portable Image Resizer
+# .gitignore
+
+# Зависимости Composer (восстанавливаются через: php composer.phar install)
+/vendor/
+
+# Кешированные миниатюры (генерируются автоматически, в git не нужны)
+/cache/*
+!/cache/.gitkeep
+
+# Локальный Composer (скачивается один раз, не коммитить)
+/composer.phar
+
+# Временные и системные файлы
+*.DS_Store
+Thumbs.db
+
+# Внутренняя документация и планы
+/.doc/

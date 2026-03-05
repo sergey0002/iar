@@ -1,4 +1,7 @@
 <?php
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
 
 /**
  * Modern Image Resizer Entry Point
@@ -154,7 +157,13 @@ if (($config['auto_format'] ?? true) && !$outputFormat) {
 // ============================================================
 $relativePath = ltrim(str_replace(rtrim($baseDir, DIRECTORY_SEPARATOR), '', $filePath), '/\\');
 $pathHash = substr(md5($relativePath), 0, 10);
-$mtime = ($config['cache_invalidation'] === 'mtime') ? filemtime($filePath) : 0;
+
+if ($config['static_mode'] ?? false) {
+	$mtime = 0; // В статичном режиме игнорируем изменения оригинала (экономим I/O)
+} else {
+	$mtime = ($config['cache_invalidation'] === 'mtime') ? filemtime($filePath) : 0;
+}
+
 
 // Суффикс кропа
 $cropSuffix = '';
@@ -183,10 +192,12 @@ $cacheFile = rtrim($config['cache_dir'], '/\\') . DIRECTORY_SEPARATOR . $cacheKe
 // ============================================================
 // 10. Cache Hit: отдача существующего кеша
 // ============================================================
-if (file_exists($cacheFile)) {
-	serveFile($cacheFile, $targetExt, $config);
+$disableCache = $config['disable_cache'] ?? false;
+if (!$disableCache && file_exists($cacheFile)) {
+	serveFile($cacheFile, $targetExt, $config, true, $filePath);
 	exit;
 }
+
 
 // ============================================================
 // 11. Cache Miss: генерация изображения
@@ -214,7 +225,7 @@ $params = [
 ];
 
 if ($service->process($filePath, $cacheFile, $params, $targetExt)) {
-	serveFile($cacheFile, $targetExt, $config);
+	serveFile($cacheFile, $targetExt, $config, false, $filePath);
 } else {
 	http_response_code(500);
 	die("Image processing failed.");
@@ -223,7 +234,7 @@ if ($service->process($filePath, $cacheFile, $params, $targetExt)) {
 // ============================================================
 // Функция отдачи файла с правильными заголовками
 // ============================================================
-function serveFile(string $path, string $ext, array $config): void
+function serveFile(string $path, string $ext, array $config, bool $isCacheHit = false, string $originalPath = null): void
 {
 	$mimes = [
 		'jpg' => 'image/jpeg',
@@ -240,20 +251,77 @@ function serveFile(string $path, string $ext, array $config): void
 	$etag = '"' . md5(filemtime($path) . filesize($path)) . '"';
 
 	// Поддержка 304 Not Modified
-	if (isset($_SERVER['HTTP_IF_NONE_MATCH']) && $_SERVER['HTTP_IF_NONE_MATCH'] === $etag) {
+	$disableCache = $config['disable_cache'] ?? false;
+	if (!$disableCache && isset($_SERVER['HTTP_IF_NONE_MATCH']) && $_SERVER['HTTP_IF_NONE_MATCH'] === $etag) {
 		http_response_code(304);
 		exit;
 	}
 
 	header('Content-Type: ' . $mime);
 	header('Content-Length: ' . filesize($path));
-	header('Cache-Control: public, max-age=31536000, immutable');
-	header('ETag: ' . $etag);
+
+	if ($disableCache) {
+		header('Cache-Control: no-cache, no-store, must-revalidate');
+		header('Pragma: no-cache');
+		header('Expires: 0');
+	} else {
+		header('Cache-Control: public, max-age=31536000, immutable');
+		header('ETag: ' . $etag);
+	}
 
 	// Vary: Accept — сообщаем CDN/прокси, что ответ зависит от Accept-заголовка
 	if ($config['auto_format'] ?? true) {
 		header('Vary: Accept');
 	}
 
-	readfile($path);
+	// ============================================================
+	// Логирование статистики (если включено в config.php)
+	// ============================================================
+	$shouldRedirect = ($config['redirect_to_cache'] ?? true);
+
+	if ($config['logging'] ?? false) {
+		$logDir = $config['log_dir'] ?? (__DIR__ . '/log');
+		if (!is_dir($logDir)) {
+			@mkdir($logDir, 0755, true);
+		}
+
+		$origSize = $originalPath && file_exists($originalPath) ? filesize($originalPath) : 0;
+		$newSize = filesize($path);
+
+		$diffBytes = $origSize - $newSize;
+		$diffPercent = $origSize > 0 ? round(($diffBytes / $origSize) * 100, 2) : 0;
+		$diffKb = round($diffBytes / 1024, 2);
+
+		$action = $shouldRedirect ? '[REDIRECT]' : '[PHP_STREAM]';
+		$logMessage = sprintf(
+			"[%s] %s %s | ORIG: %d bytes -> NEW: %d bytes | SAVED: %.2f KB (%.2f%%) | URL: %s | PARAMS: %s\n",
+			date('Y-m-d H:i:s'),
+			$isCacheHit ? '[CACHE HIT]' : '[PROCESSED]',
+			$action,
+			$origSize,
+			$newSize,
+			$diffKb,
+			$diffPercent,
+			$_SERVER['REQUEST_URI'] ?? '',
+			json_encode($_GET, JSON_UNESCAPED_UNICODE)
+		);
+
+		$logFile = rtrim($logDir, '/\\') . DIRECTORY_SEPARATOR . date('Y-m-d') . '.log';
+		@file_put_contents($logFile, $logMessage, FILE_APPEND | LOCK_EX);
+	}
+
+	// ============================================================
+	// Отдача: Редирект ИЛИ чтение потоком
+	// ============================================================
+	if ($shouldRedirect && !$disableCache) {
+		$scriptPath = dirname($_SERVER['SCRIPT_NAME']);
+		$cacheUrlPath = rtrim($scriptPath, '/\\') . '/cache/' . basename($path);
+
+		// В статичном режиме можно смело давать 301 (Permanent), иначе 302 (Found)
+		$redirectCode = ($config['static_mode'] ?? false) ? 301 : 302;
+		header("Location: $cacheUrlPath", true, $redirectCode);
+		exit;
+	} else {
+		readfile($path);
+	}
 }

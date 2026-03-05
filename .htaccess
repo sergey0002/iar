@@ -1,15 +1,13 @@
 <IfModule mod_rewrite.c>
     RewriteEngine On
-    RewriteBase /iar/
 
-    # Прямая отдача файлов из cache/ без PHP (ускорение cache-hit запросов)
-    RewriteCond %{REQUEST_URI} ^/iar/cache/
+    # Прямая отдача существующих файлов из cache/ (ускорение)
     RewriteCond %{REQUEST_FILENAME} -f
-    RewriteRule ^ - [L]
+    RewriteRule ^cache/ - [L]
 
-    # Все запросы к изображениям (кроме кеша) — через index.php. 
-    # Это позволяет ресайзить даже СУЩЕСТВУЮЩИЕ файлы и делать авто-формат (WebP/AVIF).
-    RewriteCond %{REQUEST_URI} !^/iar/cache/
+    # Все запросы к изображениям (кроме папки кеша) — через index.php. 
+    # Правило работает относительно текущей директории файла .htaccess
+    RewriteCond $1 !^cache/
     RewriteRule ^(.*)\.(jpg|jpeg|png|gif|webp|avif|svg)$ index.php?name=$1.$2 [L,QSA,NC]
 
 </IfModule>

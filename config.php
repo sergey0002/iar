@@ -28,7 +28,7 @@ return [
     'auto_format' => true,     // Автовыбор WebP/AVIF на основе Accept браузера
     'cache_invalidation' => 'mtime',  // 'mtime' (по дате изменения) или 'off'
     'cache_auto_clean' => true,     // Удалять старые версии кеша при обновлении оригинала
-    'redirect_to_cache' => true,    // true = редирект (301/302) на файл кеша, false = отдавать через PHP
+    'redirect_to_cache' => false,    // true = редирект (301/302) на файл кеша, false = отдавать через PHP
     'static_mode' => false,         // true = отдавать кеш сразу (без проверок mtime оригинала) для макс. скорости
     'disable_cache' => false,       // true = отключает кеш (всегда перегенерирует), полезно для разработки
 

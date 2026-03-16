@@ -165,7 +165,6 @@ class ResizeService
                     && ($pngThreshold === 0 || $image->width() <= $pngThreshold);
 
                 $image->toPng(
-                    compression: $compression,
                     indexed: $useIndexed
                 )->save($destPath);
                 break;

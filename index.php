@@ -42,9 +42,15 @@ $baseDir = rtrim(realpath($config['images_base_dir']), DIRECTORY_SEPARATOR) . DI
 
 // Убираем ведущие слэши из name чтобы не сломать realpath
 $name = ltrim($name, '/\\');
-$filePath = realpath($baseDir . $name);
+$fullPathCandidate = $baseDir . $name;
+$filePath = realpath($fullPathCandidate);
 
-if (!$filePath || strncmp($filePath, $baseDir, strlen($baseDir)) !== 0) {
+if ($filePath === false) {
+	http_response_code(404);
+	die("File not found.");
+}
+
+if (strncmp($filePath, $baseDir, strlen($baseDir)) !== 0) {
 	http_response_code(403);
 	die("Access denied.");
 }
@@ -135,7 +141,7 @@ if ($found > 1) {
 // ============================================================
 $targetExt = $outputFormat ?: $extension;
 
-if (($config['auto_format'] ?? true) && !$outputFormat) {
+if (($config['auto_format'] ?? true) && !$outputFormat && $extension !== 'svg') {
 	$acceptHeader = $_SERVER['HTTP_ACCEPT'] ?? '';
 	if (
 		str_contains($acceptHeader, 'image/avif')
@@ -145,6 +151,7 @@ if (($config['auto_format'] ?? true) && !$outputFormat) {
 		$targetExt = 'avif';
 	} elseif (
 		str_contains($acceptHeader, 'image/webp')
+		&& function_exists('imagewebp')
 		&& in_array('webp', $config['allowed_extensions'], true)
 	) {
 		$targetExt = 'webp';
@@ -156,6 +163,7 @@ if (($config['auto_format'] ?? true) && !$outputFormat) {
 //    Формат: [name]__[w]x[h][crop][mode]__[md5-path-10]_[mtime].[ext]
 // ============================================================
 $relativePath = ltrim(str_replace(rtrim($baseDir, DIRECTORY_SEPARATOR), '', $filePath), '/\\');
+$relativePath = str_replace(DIRECTORY_SEPARATOR, '/', $relativePath); // Нормализуем для консистентности хеша
 $pathHash = substr(md5($relativePath), 0, 10);
 
 if ($config['static_mode'] ?? false) {
@@ -227,14 +235,42 @@ $params = [
 if ($service->process($filePath, $cacheFile, $params, $targetExt)) {
 	serveFile($cacheFile, $targetExt, $config, false, $filePath);
 } else {
-	http_response_code(500);
-	die("Image processing failed.");
+	// Редирект на оригинал: выходим из папки thubms в корень проекта
+	$scriptDir = $_SERVER['SCRIPT_NAME'] ?? '/thubms/index.php';
+	$parentDir = dirname(dirname($scriptDir));
+	$parentDir = rtrim($parentDir, '/\\');
+	if ($parentDir === '')
+		$parentDir = '/';
+
+	// Очищаем имя от лишних слешей и склеиваем
+	$cleanName = ltrim($name, '/\\');
+	$redirectUrl = rtrim($parentDir, '/') . '/' . $cleanName;
+
+	if ($config['logging'] ?? false) {
+		$logDir = $config['log_dir'] ?? (__DIR__ . '/log');
+		if (!is_dir($logDir)) {
+			@mkdir($logDir, 0755, true);
+		}
+		$logFile = rtrim($logDir, '/\\') . DIRECTORY_SEPARATOR . date('Y-m-d') . '.log';
+		$logMessage = sprintf(
+			"[%s] [FAIL] [REDIRECT_TO_ORIGINAL] | Reason: %s | URL: %s | REDIRECT: %s | PARAMS: %s\n",
+			date('Y-m-d H:i:s'),
+			$reason,
+			$_SERVER['REQUEST_URI'] ?? '',
+			$redirectUrl,
+			json_encode($_GET, JSON_UNESCAPED_UNICODE)
+		);
+		@file_put_contents($logFile, $logMessage, FILE_APPEND | LOCK_EX);
+	}
+
+	header("Location: $redirectUrl", true, 302);
+	exit;
 }
 
 // ============================================================
 // Функция отдачи файла с правильными заголовками
 // ============================================================
-function serveFile(string $path, string $ext, array $config, bool $isCacheHit = false, string $originalPath = null): void
+function serveFile(string $path, string $ext, array $config, bool $isCacheHit = false, ?string $originalPath = null): void
 {
 	$mimes = [
 		'jpg' => 'image/jpeg',
@@ -258,6 +294,7 @@ function serveFile(string $path, string $ext, array $config, bool $isCacheHit = 
 	}
 
 	header('Content-Type: ' . $mime);
+	header('Vary: Accept');
 	header('Content-Length: ' . filesize($path));
 
 	if ($disableCache) {

@@ -21,3 +21,7 @@ Thumbs.db
 # Логи (генерируются автоматически)
 /log/*
 !/log/.gitkeep
+
+# Audit report
+/audit.md
+

@@ -1,33 +1,85 @@
+# ============================================================
+# IAR — Image Auto Resizer
+# Правила относительные: папку можно переименовывать и переносить.
+# ============================================================
+
+# Запрет листинга каталогов (аудит S-05/DEP-01)
+Options -Indexes
+
 <IfModule mod_rewrite.c>
     RewriteEngine On
 
-    # Прямая отдача существующих файлов из cache/ (ускорение)
+    # Dotfiles (.git, .env, .htaccess и т.п.) наружу не отдаём (DEP-03)
+    RewriteRule (^|/)\. - [F]
+
+    # Служебные каталоги закрыты. cache/ намеренно открыт —
+    # на него ведёт редирект redirect_to_cache.
+    RewriteRule ^(log|vendor|src|docs|tests|tools)(/|$) - [F]
+
+    # Существующий файл кеша отдаёт сам Apache (без PHP)
     RewriteCond %{REQUEST_FILENAME} -f
     RewriteRule ^cache/ - [L]
 
-    # Все запросы к изображениям (кроме папки кеша) — через index.php. 
-    # Правило работает относительно текущей директории файла .htaccess
+    # Изображения — через index.php.
+    # [B] экранирует backreference: имена с '&' больше не ломаются (B-12).
     RewriteCond $1 !^cache/
-    RewriteRule ^(.*)\.(jpg|jpeg|png|gif|webp|avif|svg)$ index.php?name=$1.$2 [L,QSA,NC]
-
+    RewriteRule ^(.*)\.(jpg|jpeg|png|gif|webp|avif|svg)$ index.php?name=$1.$2 [L,QSA,NC,B]
 </IfModule>
 
 # ============================================================
-# Безопасность: блокировка прямого доступа к PHP-скриптам
-# кроме index.php (точки входа)
+# Из PHP-файлов доступен только index.php
 # ============================================================
-<FilesMatch "^(download_composer|resize_class)\.php$">
-    Order deny,allow
-    Deny from all
+<FilesMatch "\.php$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
+
+<Files "index.php">
+    <IfModule mod_authz_core.c>
+        Require all granted
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Allow from all
+    </IfModule>
+</Files>
+
+# Служебные файлы конфигурации и сборки
+<FilesMatch "^(config\.php|composer\.(json|lock|phar)|phpunit\.xml(\.dist)?|infection\.json(\.dist)?|\.editorconfig|\.gitignore|\.php-cs-fixer(\.dist)?\.php)$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
+
+# Логи отладки не должны скачиваться по HTTP (аудит L-02)
+<FilesMatch "\.log$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
 </FilesMatch>
 
 # ============================================================
-# SEC-07: SVG в cache/ — Content-Security-Policy чтобы запретить
-# скрипты в SVG-файлах при прямом доступе браузера
+# Заголовки безопасности при прямой отдаче Apache.
+# В PHP-пути те же заголовки ставит App\Application.
 # ============================================================
 <IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+
+    # SVG может содержать скрипты — запрещаем выполнение (аудит S-01)
     <FilesMatch "\.svg$">
-        Header set Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'"
-        Header set X-Content-Type-Options "nosniff"
+        Header always set Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; sandbox"
     </FilesMatch>
 </IfModule>

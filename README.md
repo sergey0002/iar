@@ -27,6 +27,17 @@
 
 ---
 
+## 🧭 Concept
+
+IAR is a **portable folder**, not a service:
+
+- **Drop-in.** Put the folder into the root of any site and route image requests through it. Nothing but PHP + GD is required; all code and dependencies live inside the folder.
+- **The cache is fully disposable.** You may delete `cache/` entirely at any time — variants are rebuilt on the first request to a URL. No warm-up, no mandatory quotas.
+- **The log is debug-only.** It is **off by default** (`logging => false`); rotation is not needed. Enable it while diagnosing.
+- **Stable URL API.** `w`, `h`, `m`, `g`, `ct/cr/cb/cl`, `fm` are unchanged.
+
+---
+
 ## 🚀 Quick Start
 
 ### Installation
@@ -200,8 +211,10 @@ Crops a given number of pixels or percentage from an edge **before** resizing.
 | :--- | :--- |
 | `webp` | Force conversion to WebP |
 | `avif` | Force conversion to AVIF |
-| `jpg` | Save as JPEG |
+| `jpg` / `jpeg` | Save as JPEG |
 | `png` | Save as PNG |
+| `gif` | Save as GIF |
+| `svg` | Only when the source is SVG (raster source → `400`) |
 
 > If `fm` is not passed and `auto_format` is enabled in the config, the script automatically selects the best format based on the browser's `Accept` header.
 
@@ -219,7 +232,10 @@ return [
     'jpeg_quality'    => 82,     // JPEG: 1–100 (82 = industry standard)
     'webp_quality'    => 85,     // WebP: 1–100
     'avif_quality'    => 75,     // AVIF: 1–100
-    'png_compression' => 9,      // PNG zlib: 0–9 (does not affect pixel quality)
+
+    // === DoS protection: INPUT image limits ===
+    'max_input_megapixels' => 40,       // MP, checked before decoding
+    'max_input_bytes'      => 20000000, // bytes (~20 MB)
 
     // === PNG Optimization ===
     'png_indexed'           => true,  // Smart indexed PNG for small images (saves 30–70%)
@@ -243,14 +259,15 @@ return [
     'redirect_to_cache'  => true,     // true = 302/301 redirect to cached file (fastest)
     'static_mode'        => false,    // true = skip mtime check, serve cache blindly (301)
     'disable_cache'      => false,    // true = disable cache (always regenerate, for dev)
+    'cache_key_config_hash' => true, // quality changes invalidate the cache
 
     // === Security & Paths ===
-    'images_base_dir'    => realpath(__DIR__ . '/../'),
+    'images_base_dir'    => __DIR__ . '/../',   // validated on load; a bad path is a hard error
     'allowed_extensions' => ['jpg', 'jpeg', 'gif', 'png', 'webp', 'avif', 'svg'],
     'cache_dir'          => __DIR__ . '/cache',
 
     // === Logging ===
-    'logging' => true,
+    'logging' => false,   // debug log; OFF by default
     'log_dir' => __DIR__ . '/log',
 ];
 ```
@@ -263,7 +280,6 @@ return [
 | `jpeg_quality` | 1–100 | JPEG quality. `82` — visually lossless with optimal file size. |
 | `webp_quality` | 1–100 | WebP lossy quality. `85` — recommended. |
 | `avif_quality` | 1–100 | AVIF quality. `75` — excellent balance of quality and size. |
-| `png_compression` | 0–9 | Level of zlib compression for PNG. **Does not affect pixel quality** (lossless). `9` = smallest file. |
 | `png_indexed` | bool | Smart indexed color (256-color palette) for PNG. Saves 30–70% on icons/flat-art. |
 | `png_indexed_threshold` | px | Width limit for smart indexed mode; images wider than this stay true-color. `0` = always indexed. |
 | `jpeg_progressive` | bool | Progressive JPEG encoding — image loads smoothly top-to-bottom in browsers. |
@@ -280,7 +296,10 @@ return [
 | `images_base_dir` | path | Root directory for originals. Requests outside this directory return 403. |
 | `allowed_extensions` | array | Whitelist of allowed extensions. Everything else returns 403. |
 | `cache_dir` | path | Folder for storing cached thumbnails. Created automatically. |
-| `logging` | bool | Enable request logging to the `log/` directory. |
+| `max_input_megapixels` | int, MP | Limit of the **source** image, checked before decoding. Exceeding it → `413`. |
+| `max_input_bytes` | int, bytes | Limit of the source file size. Exceeding it → `413`. |
+| `cache_key_config_hash` | bool | Include a fingerprint of quality settings in the cache key. |
+| `logging` | bool | Debug request log. **`false` by default.** |
 | `log_dir` | path | Directory for log files (one file per day). |
 
 ### Cache Mode Comparison
@@ -312,9 +331,151 @@ return [
 | **WebP Metadata Strip** | Remove EXIF/XMP from output WebP files. |
 | **SVG Support** | SVG is passed through as-is (or rasterized via Imagick). |
 | **Path Traversal Protection** | Strict path verification — impossible to escape `images_base_dir`. |
-| **DoS Protection** | `max_width` / `max_height` limits prevent generating massive images. |
+| **DoS Protection** | Output limits (`max_width`/`max_height`) **and input limits** (`max_input_megapixels`/`max_input_bytes`, checked before decoding → `413`). |
 | **Lossless Mode** | Global maximum quality with a single config flag. |
-| **Logging** | Per-day log files with cache status, redirect type, and size savings. |
+| **Debug log** | JSON lines: cache status, size savings, failure reason. Off by default, sensitive keys redacted. |
+| **Atomic cache** | Temp file + `rename`, `flock` against stampede. |
+| **Safe SVG** | `Content-Security-Policy` and `nosniff` on the PHP path too, not only in Apache. |
+| **HEAD and 405** | Proper bodyless `HEAD`, `405` + `Allow` for other methods. |
+| **100% test coverage** | Unit plus integration HTTP scenarios, coverage gate in CI. |
+
+---
+
+## 🏗 Architecture and request flow
+
+```
+index.php            thin entry point (dependencies + bootstrap)
+└── App\Bootstrap    display_errors=0, fatal handler, wiring
+    ├── App\Config           typed, validated config (fail-fast)
+    ├── App\Http\Request    parameter parsing and validation (400/405)
+    ├── App\Application      orchestration: path → key → cache → response
+    │   ├── App\Domain\FormatNegotiator  Accept-based format choice
+    │   ├── App\Domain\ResizeService     Intervention Image (GD)
+    │   │   └── App\Domain\SvgRasterizer → ImagickRasterizer
+    │   ├── App\Infrastructure\CacheKey   variant key
+    │   ├── App\Infrastructure\CacheStore atomic write + flock
+    │   └── App\Infrastructure\DebugLogger|NullLogger
+    └── App\Http\Response → SapiInterface (NativeSapi in prod, TestSapi in tests)
+```
+
+Flow: `resolveSource` (realpath + whitelist) → params → target format → `mtime`
+→ cache key → file exists? serve : lock → generate → atomic publish → serve
+(or redirect to the static file).
+
+The cache key includes the **full relative path** of the source, dimensions,
+mode, gravity, crop, `mtime` and a fingerprint of quality settings — collisions
+between `/photo.jpg` and `/www/photo.jpg` are no longer possible.
+
+---
+
+## 🧪 Testing
+
+Tests need neither PHPUnit nor Xdebug — that is part of the portability concept.
+
+```bash
+# Unit tests without composer and PHPUnit
+php tests/run.php
+
+# Integration HTTP scenarios (built-in PHP server, real headers)
+php tools/integration.php run
+
+# Line coverage without Xdebug/PCOV + 100% gate
+php tools/coverage-portable.php build
+php tests/coverage-run.php
+php tools/integration.php run
+php tools/coverage-portable.php report 100
+```
+
+With Composer the usual commands are available:
+
+```bash
+composer test              # PHPUnit
+composer test-all          # portable runner + integration
+composer coverage          # clover report
+composer coverage-gate     # 100% threshold on clover
+composer coverage-portable # independent coverage check
+composer stan              # PHPStan
+composer cs                # PHP-CS-Fixer (dry-run)
+composer mutation          # Infection, MSI >= 90
+```
+
+Covered: parameter validation, crop boundaries, cache-key collisions, format
+whitelists, GIF animation, headers/304/redirects, invalidation, **full cache
+wipe → regeneration**, DoS limits, SVG CSP, cache write failures, worker races,
+fatal errors. Report: [`docs/implementation-report.md`](docs/implementation-report.md).
+
+---
+
+## 🚢 Deployment
+
+### Apache
+
+`.htaccess` is already configured: `-Indexes`, denial of service files and
+directories (`config.php`, `log/`, `vendor/`, `src/`, `tests/`, dotfiles,
+`.git/`), cache passthrough, `[B]` in the rewrite rule (names with `&`),
+`nosniff` and a CSP for SVG. Requires `mod_rewrite` and `AllowOverride All`.
+
+### nginx
+
+```nginx
+location /iar/ {
+    try_files $uri @iar;
+}
+
+location @iar {
+    rewrite ^/iar/(.*)$ /iar/index.php?name=$1 last;
+}
+
+location = /iar/index.php {
+    fastcgi_pass unix:/run/php/php-fpm.sock;
+    include fastcgi_params;
+    fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+}
+
+location ~ ^/iar/(config\.php|composer\.|src/|tests/|tools/|log/|vendor/|\.) {
+    deny all;
+}
+```
+
+### Wiping the cache
+
+```bash
+rm -rf /path/to/site/iar/cache/*
+```
+
+No warm-up is needed: the next request to a URL rebuilds the variant.
+
+### Troubleshooting
+
+| Symptom | Cause | Fix |
+| :--- | :--- | :--- |
+| `500` mentioning `composer install` | dependencies missing | run `composer install --no-dev -o` inside the folder |
+| `500 Configuration error.` | bad `images_base_dir` or value type | check `config.php`; the error is intentionally explicit |
+| `302` to the original instead of a thumbnail | GD could not process the file | set `logging => true` and read `reason` in `log/` |
+| `413` | source exceeds `max_input_megapixels` / `max_input_bytes` | shrink the source or raise the limit |
+| Photo rotated incorrectly | `ext-exif` missing | install `php-exif` |
+| SVG not rasterized | `ext-imagick` missing | install `php-imagick` or serve SVG as is |
+| No AVIF output | GD built without AVIF | update GD; WebP is selected automatically |
+
+---
+
+## ⚠️ Changes since 1.x
+
+| Item | Before | Now |
+| :--- | :--- | :--- |
+| `logging` | `true` | **`false`** (debug-only by design) |
+| `png_compression` | documented | **removed** — it never worked |
+| `fm=svg` for raster | JPEG named `.svg` | `400` |
+| GIF + `Accept: image/webp` | animation lost | GIF preserved |
+| `ct=-50`, `ct=150p` | bars / black image | `400` or a correct clamp |
+| `Cache-Control` | `immutable` for a year, always | `no-cache`; `immutable` only in `static_mode` |
+| `304` | no headers | with `ETag`, `Cache-Control`, `Vary` |
+| POST/PUT | handled as GET | `405` + `Allow` |
+| Array in `w`/`h` | `500` | `400` |
+| 140 MP source | fatal OOM | `413` before decoding |
+| Request without parameters | re-encoded | byte copy of the original |
+
+The URL API is unchanged: existing links keep working.
 
 ---
 
@@ -325,7 +486,9 @@ return [
 | PHP | ≥ 8.1 | 8.2+ |
 | PHP GD extension | ✅ Required | + WebP + AVIF support |
 | Apache `mod_rewrite` | — | ✅ For clean URLs |
+| `php-exif` | — | ✅ Correct JPEG orientation |
 | `php-imagick` | — | ✅ For SVG → raster |
+| Composer | — | ✅ Only to install dependencies |
 
 ---
 
@@ -333,6 +496,9 @@ return [
 
 - [**README на русском (По-русски)**](README_RU.md)
 - [Configuration Reference](config.php)
+- [Project audit](docs/audit.md)
+- [Remediation plan](docs/remediation-plan.md)
+- [Implementation & test report](docs/implementation-report.md)
 
 ---
 

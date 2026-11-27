@@ -1,0 +1,21 @@
+{
+    "$schema": "vendor/infection/infection/resources/schema.json",
+    "source": {
+        "directories": ["src"],
+        "excludes": ["Exception"]
+    },
+    "logs": {
+        "text": "infection.log",
+        "summary": "summary.log"
+    },
+    "mutators": {
+        "@default": true,
+        "MethodCallRemoval": {
+            "ignore": ["App\\Infrastructure\\NullLogger::log"]
+        }
+    },
+    "testFramework": "phpunit",
+    "testFrameworkOptions": "--testsuite unit",
+    "minMsi": 90,
+    "minCoveredMsi": 90
+}

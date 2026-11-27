@@ -1,0 +1,12 @@
+parameters:
+    level: 6
+    paths:
+        - src
+        - index.php
+    treatPhpDocTypesAsCertain: false
+    checkMissingIterableValueType: false
+    ignoreErrors:
+        # Расширение подключается опционально: класс проверяется через class_exists().
+        -
+            message: '#.*Imagick.*#'
+            path: src/Infrastructure/ImagickRasterizer.php

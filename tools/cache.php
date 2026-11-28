@@ -170,7 +170,12 @@ if ($command === 'clean') {
     $reasons = array();
 
     if (isset($options['source']) && is_string($options['source'])) {
-        $source = $cfg['base'] . ltrim($options['source'], '/');
+        // Путь можно задать так же, как в URL: с псевдонимом и папкой-пресетом.
+        // Кеш-ключ считается от реального пути, поэтому раскрываем маршрут.
+        $requested = ltrim($options['source'], '/');
+        $router = iar_legacy_router($cfg['aliases_file'], $cfg['base']);
+        $routed = iar_legacy_route($router, $requested);
+        $source = $cfg['base'] . $routed['name'];
         $marker = iar_legacy_hash_marker($source, $cfg['base']);
         $prefix = pathinfo($source, PATHINFO_FILENAME) . '__';
         foreach ($entries as $entry) {
@@ -178,7 +183,8 @@ if ($command === 'clean') {
                 $selected[$entry['name']] = $entry;
             }
         }
-        $reasons[] = 'оригинал ' . $options['source'];
+        $reasons[] = 'оригинал ' . $options['source']
+            . ($routed['name'] === $requested ? '' : ' (путь ' . $routed['name'] . ')');
     }
 
     if (isset($options['older-than']) && is_string($options['older-than'])) {
@@ -253,6 +259,7 @@ echo <<<TEXT
 
   php tools/cache.php stats
   php tools/cache.php clean --source=photo.jpg [--dry-run]
+                            путь можно писать как в URL: --source=z/thumb/photo.jpg
   php tools/cache.php clean --older-than=30d [--dry-run]
   php tools/cache.php clean --orphans [--dry-run]
   php tools/cache.php clean --max-size=500M [--dry-run]

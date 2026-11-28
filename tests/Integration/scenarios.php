@@ -19,10 +19,18 @@ declare(strict_types=1);
  * Ключи шага: get, server, action, use_previous_etag.
  * Действия: wipe_cache, touch_source, lower_quality, break_vendor.
  * requires: '' | 'webp' | 'avif' | 'imagick' — сценарий пропускается без расширения.
+ * aliases: содержимое aliases.json площадки (массив или сырая строка).
  */
 
-$scenario = static function (string $name, array $steps, array $config = [], string $requires = ''): array {
-    return ['name' => $name, 'config' => $config, 'steps' => $steps, 'requires' => $requires];
+/** @param array<string,mixed>|string $aliases содержимое aliases.json (массив или сырой текст) */
+$scenario = static function (
+    string $name,
+    array $steps,
+    array $config = [],
+    string $requires = '',
+    array|string $aliases = [],
+): array {
+    return ['name' => $name, 'config' => $config, 'steps' => $steps, 'requires' => $requires, 'aliases' => $aliases];
 };
 
 $step = static function (array $get, array $expect, array $server = [], ?string $action = null, bool $etag = false): array {
@@ -409,4 +417,108 @@ return [
             'body_not_contains' => '/www',
         ], [], 'break_vendor'),
     ]),
+
+    // -----------------------------------------------------------------
+    // Маршруты из aliases.json (псевдонимы, пресеты, макросы)
+    // -----------------------------------------------------------------
+
+    $scenario('alias hides the real directory', [
+        $step(['name' => 'z/x-300/photo.jpg'], [
+            'status' => 200,
+            'headers' => ['Content-Type' => 'image/jpeg', 'X-Iar-Cache' => 'miss'],
+            'image_size' => [300, 200],
+            'cache_files' => ['prefix' => 'photo__300x0', 'count' => 1],
+        ]),
+        $step(['name' => 'z/x-300/photo.jpg'], [
+            'status' => 200,
+            'headers' => ['X-Iar-Cache' => 'hit'],
+            'header_same_as_previous' => ['ETag' => 'ETag'],
+        ]),
+    ], [], '', ['aliases' => ['z' => '/nested/www/'], 'macros' => ['enabled' => true]]),
+
+    $scenario('preset folder equals explicit query parameters', [
+        $step(['name' => 'thumb/photo.jpg'], [
+            'status' => 200,
+            'image_size' => [300, 200],
+            'headers' => ['X-Iar-Cache' => 'miss'],
+        ]),
+        $step(['name' => 'photo.jpg', 'w' => '300', 'h' => '200', 'm' => 'cover'], [
+            'status' => 200,
+            'headers' => ['X-Iar-Cache' => 'hit'],
+            'cache_files' => ['prefix' => 'photo__300x200', 'count' => 1],
+        ]),
+    ], [], '', ['presets' => ['thumb' => ['w' => 300, 'h' => 200, 'm' => 'cover']]]),
+
+    $scenario('macro sets exactly one dimension', [
+        $step(['name' => 'x-400/photo.jpg'], ['status' => 200, 'image_size' => [400, 267]]),
+        $step(['name' => 'y-200/photo.jpg'], ['status' => 200, 'image_size' => [300, 200]]),
+    ], [], '', ['macros' => ['enabled' => true]]),
+
+    $scenario('query parameter beats the path preset', [
+        $step(['name' => 'thumb/photo.jpg', 'w' => '150'], [
+            'status' => 200,
+            'image_size' => [150, 100],
+        ]),
+    ], [], '', ['presets' => ['thumb' => ['w' => 300]]]),
+
+    $scenario('only the last folder is a preset', [
+        $step(['name' => 'thumb/nested/www/photo.jpg'], ['status' => 404]),
+    ], [], '', ['presets' => ['thumb' => ['w' => 300]]]),
+
+    $scenario('real directory wins over a preset', [
+        $step(['name' => 'nested/www/photo.jpg', 'w' => '120'], [
+            'status' => 200,
+            'image_size' => [120, 80],
+        ]),
+    ], [], '', ['presets' => ['www' => ['w' => '300', 'h' => '300', 'm' => 'cover']]]),
+
+    $scenario('aliased failure serves the original inline', [
+        $step(['name' => 'z/corrupt.jpg', 'w' => '100'], [
+            'status' => 200,
+            'headers' => ['X-Iar-Fallback' => 'original', 'Cache-Control' => 'no-store'],
+            'headers_absent' => ['Location'],
+            'body_equals_source' => 'corrupt.jpg',
+            'log_contains' => '"alias":"z"',
+        ]),
+    ], ['logging' => true], '', ['aliases' => ['z' => '']]),
+
+    $scenario('preset without alias still redirects on failure', [
+        $step(['name' => 'thumb/corrupt.jpg', 'w' => '100'], [
+            'status' => 302,
+            'headers' => ['Location' => '/corrupt.jpg'],
+        ]),
+    ], [], '', ['presets' => ['thumb' => ['w' => 300]]]),
+
+    $scenario('broken aliases file does not break images', [
+        $step(['name' => 'photo.jpg', 'w' => '100'], [
+            'status' => 200,
+            'image_size' => [100, 67],
+            'log_contains' => '"stage":"aliases"',
+        ]),
+        $step(['name' => 'z/photo.jpg', 'w' => '100'], ['status' => 404]),
+    ], ['logging' => true], '', '{broken json'),
+
+    $scenario('routing can be switched off', [
+        $step(['name' => 'z/photo.jpg', 'w' => '100'], ['status' => 404]),
+    ], [], '', ['enabled' => false, 'aliases' => ['z' => 'nested/www']]),
+
+    $scenario('alias works on the dependency-free engine', [
+        $step(['name' => 'img/x-100/photo.jpg'], [
+            'status' => 200,
+            'headers' => ['X-Iar-Engine' => 'legacy', 'Content-Type' => 'image/jpeg'],
+            'image_size' => [100, 67],
+        ], [], 'break_vendor'),
+    ], [], '', ['aliases' => ['img' => 'nested/www']]),
+
+    $scenario('both engines share the cache for a preset', [
+        $step(['name' => 'thumb/photo.jpg'], [
+            'status' => 200,
+            'headers' => ['X-Iar-Engine' => 'intervention'],
+        ]),
+        $step(['name' => 'thumb/photo.jpg'], [
+            'status' => 200,
+            'headers' => ['X-Iar-Engine' => 'legacy', 'X-Iar-Cache' => 'hit'],
+            'header_same_as_previous' => ['ETag' => 'ETag'],
+        ], [], 'break_vendor'),
+    ], [], '', ['presets' => ['thumb' => ['w' => 240]]]),
 ];

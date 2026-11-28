@@ -49,8 +49,10 @@ Options -Indexes
     </IfModule>
 </Files>
 
-# Служебные файлы конфигурации и сборки
-<FilesMatch "^(config\.php|composer\.(json|lock|phar)|phpunit\.xml(\.dist)?|infection\.json(\.dist)?|\.editorconfig|\.gitignore|\.php-cs-fixer(\.dist)?\.php)$">
+# Служебные файлы конфигурации и сборки.
+# aliases.json закрыт намеренно: он раскрывает реальные каталоги,
+# которые псевдонимы как раз и прячут.
+<FilesMatch "^(config\.php|aliases\.json|composer\.(json|lock|phar)|phpunit\.xml(\.dist)?|infection\.json(\.dist)?|\.editorconfig|\.gitignore|\.php-cs-fixer(\.dist)?\.php)$">
     <IfModule mod_authz_core.c>
         Require all denied
     </IfModule>

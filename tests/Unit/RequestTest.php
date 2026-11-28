@@ -11,6 +11,7 @@ use App\Domain\Side;
 use App\Domain\Unit;
 use App\Exception\BadRequestException;
 use App\Exception\MethodNotAllowedException;
+use App\Http\PathRouter;
 use App\Http\Request;
 use App\Tests\Support\Factory;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -309,5 +310,124 @@ final class RequestTest extends TestCase
 
         self::assertArrayHasKey('w', $request->query);
         self::assertArrayHasKey('name', $request->query);
+    }
+
+    // -----------------------------------------------------------------
+    // Параметры из пути (aliases.json) и их приоритет
+    // -----------------------------------------------------------------
+
+    private function router(): PathRouter
+    {
+        return Factory::router($this->site, [
+            'aliases' => ['z' => 'nested/www'],
+            'presets' => ['thumb' => ['w' => 300, 'h' => 200, 'm' => 'cover', 'g' => 'top', 'fm' => 'webp']],
+        ]);
+    }
+
+    public function testRequestWithoutRouterHasPlainRoute(): void
+    {
+        $request = Factory::request($this->site, ['w' => '10']);
+
+        self::assertFalse($request->route->isRewritten());
+        self::assertSame('photo.jpg', $request->route->name);
+        self::assertSame($request->query, $request->params);
+    }
+
+    public function testPresetSuppliesAllParameters(): void
+    {
+        $request = Factory::request($this->site, ['name' => 'thumb/photo.jpg'], [], $this->router());
+
+        self::assertSame('photo.jpg', $request->name);
+        self::assertSame(300, $request->width);
+        self::assertSame(200, $request->height);
+        self::assertSame(Mode::Cover, $request->mode);
+        self::assertSame(Gravity::Top, $request->gravity);
+        self::assertSame(Format::Webp, $request->format);
+        self::assertSame('thumb', $request->route->preset);
+    }
+
+    public function testMacroSetsExactlyOneDimension(): void
+    {
+        $width = Factory::request($this->site, ['name' => 'x-2000/photo.jpg'], [], $this->router());
+        $height = Factory::request($this->site, ['name' => 'y-1000/photo.jpg'], [], $this->router());
+
+        self::assertSame(2000, $width->width);
+        self::assertSame(0, $width->height);
+        self::assertSame(0, $height->width);
+        self::assertSame(1000, $height->height);
+    }
+
+    public function testExplicitQueryWinsOverPathParameters(): void
+    {
+        $request = Factory::request(
+            $this->site,
+            ['name' => 'thumb/photo.jpg', 'w' => '50', 'm' => 'resize'],
+            [],
+            $this->router(),
+        );
+
+        self::assertSame(50, $request->width);
+        self::assertSame(200, $request->height);
+        self::assertSame(Mode::Resize, $request->mode);
+    }
+
+    public function testEmptyQueryValueFallsBackToPathParameter(): void
+    {
+        $request = Factory::request($this->site, ['name' => 'x-800/photo.jpg', 'w' => '  '], [], $this->router());
+
+        self::assertSame(800, $request->width);
+    }
+
+    public function testZeroFromQueryIsNotReplacedByPathParameter(): void
+    {
+        $request = Factory::request($this->site, ['name' => 'x-800/photo.jpg', 'w' => '0'], [], $this->router());
+
+        self::assertSame(0, $request->width);
+    }
+
+    public function testInvalidPresetValueIsRejectedAsUsualParameter(): void
+    {
+        $router = Factory::router($this->site, ['presets' => ['bad' => ['w' => '-5']]]);
+
+        $this->expectException(BadRequestException::class);
+        Factory::request($this->site, ['name' => 'bad/photo.jpg'], [], $router);
+    }
+
+    public function testPresetCropIsParsed(): void
+    {
+        $router = Factory::router($this->site, ['presets' => ['crop' => ['ct' => '10p', 'cr' => '20']]]);
+        $request = Factory::request($this->site, ['name' => 'crop/photo.jpg'], [], $router);
+
+        self::assertSame(Side::Top, $request->crop?->side);
+        self::assertSame(Unit::Percent, $request->crop?->unit);
+        self::assertTrue($request->multipleCropParams);
+    }
+
+    public function testAliasRewritesNameAndKeepsOriginal(): void
+    {
+        $request = Factory::request($this->site, ['name' => 'z/photo.jpg'], [], $this->router());
+
+        self::assertSame('nested/www/photo.jpg', $request->name);
+        self::assertSame('z/photo.jpg', $request->route->original);
+        self::assertTrue($request->route->hasAlias());
+    }
+
+    public function testParamsContainPathValuesButQueryDoesNot(): void
+    {
+        $request = Factory::request($this->site, ['name' => 'x-640/photo.jpg'], [], $this->router());
+
+        self::assertSame('640', $request->params['w']);
+        self::assertArrayNotHasKey('w', $request->query);
+    }
+
+    public function testRealDirectoryWinsOverPresetInRequest(): void
+    {
+        mkdir($this->site . '/thumb', 0777, true);
+        copy($this->site . '/photo.jpg', $this->site . '/thumb/photo.jpg');
+
+        $request = Factory::request($this->site, ['name' => 'thumb/photo.jpg'], [], $this->router());
+
+        self::assertSame('thumb/photo.jpg', $request->name);
+        self::assertSame(0, $request->width);
     }
 }

@@ -159,6 +159,43 @@ composer install --no-dev --optimize-autoloader
 
 ---
 
+### Короткие пути: псевдонимы, пресеты и макросы
+
+Один файл `aliases.json` рядом с `index.php` превращает короткий URL в реальный
+путь и в параметры обработки. Файл уже в репозитории и работает сразу.
+
+```html
+<!-- Псевдоним каталога: z → /z/s/d/f/ -->
+<img src="/iar/z/file.png">
+
+<!-- Папка-пресет: 1000 = максимальная ширина 1000 -->
+<img src="/iar/1000/file.png">
+
+<!-- Макрос: x-2000 = только ширина, y-1000 = только высота -->
+<img src="/iar/x-2000/file.png">
+<img src="/iar/y-1000/file.png">
+
+<!-- Псевдоним + пресет вместе -->
+<img src="/iar/z/thumb/file.png">
+```
+
+```json
+{
+    "aliases":  {"z": "/z/s/d/f/", "img": "/assets/images/"},
+    "presets":  {"1000": {"w": 1000}, "thumb": {"w": 300, "h": 300, "m": "cover"}},
+    "macros":   {"enabled": true, "width": "x-", "height": "y-"}
+}
+```
+
+Главное: реальный файл всегда важнее виртуального маршрута, явный `?w=` важнее
+папки-пресета, пресет важнее маски, а виртуальной может быть **только последняя
+папка** перед именем файла. Сломанный JSON не ломает картинки — маршруты просто
+выключаются, причина уходит в лог.
+
+Подробности, приоритеты и безопасность: [**docs/path-routing.md**](docs/path-routing.md).
+
+---
+
 ## 🔗 URL API — Полный справочник параметров
 
 ### Основные параметры
@@ -269,6 +306,7 @@ return [
     'images_base_dir'    => __DIR__ . '/../',   // проверяется при загрузке; плохой путь — явная ошибка
     'allowed_extensions' => ['jpg', 'jpeg', 'gif', 'png', 'webp', 'avif', 'svg'],
     'cache_dir'          => __DIR__ . '/cache',
+    'aliases_file'       => __DIR__ . '/aliases.json', // маршруты: псевдонимы, пресеты, макросы
 
     // === Логирование ===
     'logging' => false,   // отладочный лог; по умолчанию выключен
@@ -306,6 +344,7 @@ return [
 | `logging` | bool | Отладочный лог. **По умолчанию `false`.** |
 | `log_dir` | path | Директория для лог-файлов (один файл в день). |
 | `log_level` | `error` / `info` / `debug` | `error` (по умолчанию) — только сбои с причиной; `info` — плюс hit/miss; `debug` — плюс параметры запроса. На `error` метрики не собираются, горячий путь не делает лишних обращений к диску. |
+| `aliases_file` | path | Путь к JSON маршрутов (псевдонимы каталогов, пресеты и макросы последней папки). По умолчанию — `aliases.json` рядом с `index.php`. См. [docs/path-routing.md](docs/path-routing.md). |
 
 ### Сравнение режимов кеша
 
@@ -323,6 +362,7 @@ return [
 | :--- | :--- |
 | **Ресайз** | Пропорциональный ресайз по ширине (`w`) или высоте (`h`). Не увеличивает маленькие изображения. |
 | **Умный кроп** | Режим `cover` с выбором точки фокуса (`g`). |
+| **Маршруты в пути** | Псевдонимы каталогов, папки-пресеты и макросы `x-`/`y-` из `aliases.json`. |
 | **Обрезка краёв** | Срезать px или % с любого края перед обработкой (`ct`, `cr`, `cb`, `cl`). |
 | **Авто WebP/AVIF** | Прозрачная конвертация в современные форматы без изменения URL. |
 | **Прозрачное кеширование** | Первый запрос = обработка. Все последующие = мгновенная отдача из кеша. |
@@ -419,7 +459,13 @@ composer mutation          # Infection, MSI ≥ 90
 Что проверяется: валидация параметров, границы кропа, коллизии кеш-ключа,
 белые списки форматов, анимация GIF, заголовки/304/редиректы, инвалидация,
 **полный сброс кеша → пересоздание**, лимиты DoS, SVG-CSP, отказ записи в кеш,
-гонка воркеров, фатальные ошибки. Отчёт — [`docs/implementation-report.md`](docs/implementation-report.md).
+гонка воркеров, фатальные ошибки, маршруты из `aliases.json` (приоритеты,
+паритет двух движков, сломанный JSON).
+
+Текущие результаты: **663 юнит-теста** (662 пройден, 1 пропущен — GD без AVIF),
+**62 из 62** HTTP-сценариев, покрытие строк **1449/1449 = 100 %**, PHP **7.0 → 8.4**
+без провалов. Отчёты — [`docs/policies-audit.md`](docs/policies-audit.md)
+и [`docs/implementation-report.md`](docs/implementation-report.md).
 
 ---
 
@@ -428,7 +474,7 @@ composer mutation          # Infection, MSI ≥ 90
 ### Apache
 
 `.htaccess` уже настроен: `-Indexes`, запрет служебных файлов и каталогов
-(`config.php`, `log/`, `vendor/`, `src/`, `tests/`, dotfiles, `.git/`),
+(`config.php`, `aliases.json`, `log/`, `vendor/`, `src/`, `tests/`, dotfiles, `.git/`),
 пропуск существующих файлов кеша мимо PHP, `[B]` в rewrite (имена с `&`),
 `nosniff` и CSP для SVG. Требуется `mod_rewrite` и `AllowOverride All`.
 
@@ -450,7 +496,7 @@ location = /iar/index.php {
     fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
 }
 
-location ~ ^/iar/(config\.php|composer\.|src/|tests/|tools/|log/|vendor/|\.) {
+location ~ ^/iar/(config\.php|aliases\.json|composer\.|src/|tests/|tools/|log/|vendor/|\.) {
     deny all;
 }
 ```
@@ -553,6 +599,7 @@ URL API не изменился: существующие ссылки прод�
 - [План исправлений](docs/remediation-plan.md)
 - [Отчёт о внедрении и тестах](docs/implementation-report.md)
 - [Аудит политик продукта](docs/policies-audit.md)
+- [Маршруты в пути: псевдонимы, пресеты, макросы](docs/path-routing.md)
 
 ---
 

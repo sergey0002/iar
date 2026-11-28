@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Tests\Unit;
 
 use App\Bootstrap;
+use App\Http\PathRouter;
 use App\Tests\Support\Factory;
 use App\Tests\Support\TestSapi;
 use PHPUnit\Framework\TestCase;
@@ -35,6 +36,7 @@ final class BootstrapTest extends TestCase
             'log_dir' => $this->site . '/log',
             'logging' => false,
             'redirect_to_cache' => false,
+            'aliases_file' => $this->site . '/aliases.json',
         ], $overrides);
 
         file_put_contents($this->configFile, '<?php return ' . var_export($config, true) . ';');
@@ -492,5 +494,154 @@ final class BootstrapTest extends TestCase
         );
 
         self::assertSame($this->site . '/photo.jpg', $path);
+    }
+
+    // -----------------------------------------------------------------
+    // Маршруты из aliases.json: обычный и аварийный путь
+    // -----------------------------------------------------------------
+
+    /** @param array<string,mixed> $json */
+    private function writeAliases(array $json): void
+    {
+        file_put_contents($this->site . '/aliases.json', (string) json_encode($json));
+    }
+
+    public function testAliasAndServeResizedImage(): void
+    {
+        $this->writeAliases(['aliases' => ['z' => 'nested/www'], 'macros' => ['enabled' => true]]);
+        $sapi = $this->run(['name' => 'z/x-60/photo.jpg']);
+
+        self::assertSame(200, $sapi->status);
+        self::assertSame('image/jpeg', $sapi->headerValue('Content-Type'));
+        self::assertSame('miss', $sapi->headerValue('X-Iar-Cache'));
+        $size = getimagesizefromstring($sapi->body);
+        self::assertSame(60, $size[0]);
+    }
+
+    public function testPresetFolderIsRemovedFromCacheKeyPath(): void
+    {
+        $this->writeAliases(['presets' => ['thumb' => ['w' => 40]]]);
+        $first = $this->run(['name' => 'thumb/photo.jpg']);
+        $second = $this->run(['name' => 'thumb/photo.jpg']);
+
+        self::assertSame('miss', $first->headerValue('X-Iar-Cache'));
+        self::assertSame('hit', $second->headerValue('X-Iar-Cache'));
+        self::assertSame($first->headerValue('ETag'), $second->headerValue('ETag'));
+    }
+
+    public function testBrokenAliasesJsonIsLoggedAndImagesStillWork(): void
+    {
+        file_put_contents($this->site . '/aliases.json', '{oops');
+        $this->writeConfig(['logging' => true, 'log_level' => 'error']);
+        $sapi = $this->run(['name' => 'photo.jpg', 'w' => '30']);
+
+        self::assertSame(200, $sapi->status);
+        self::assertSame('miss', $sapi->headerValue('X-Iar-Cache'));
+
+        $logged = (string) file_get_contents($this->site . '/log/' . date('Y-m-d') . '.log');
+        self::assertStringContainsString('"stage":"aliases"', $logged);
+        self::assertStringContainsString('JSON object', $logged);
+    }
+
+    public function testBrokenAliasesJsonDoesNotBreakAliasedLookingPath(): void
+    {
+        file_put_contents($this->site . '/aliases.json', '{oops');
+        $sapi = $this->run(['name' => 'nested/www/photo.jpg', 'w' => '30']);
+
+        self::assertSame(200, $sapi->status);
+    }
+
+    public function testAliasesAreDisabledByFlag(): void
+    {
+        $this->writeAliases(['enabled' => false, 'aliases' => ['z' => 'nested/www']]);
+        $sapi = $this->run(['name' => 'z/photo.jpg', 'w' => '30']);
+
+        self::assertSame(404, $sapi->status);
+    }
+
+    public function testOriginalFileResolvesAliasWithGivenRouter(): void
+    {
+        $router = Factory::router($this->site, ['aliases' => ['z' => 'nested/www']]);
+        $path = Bootstrap::originalFile(
+            ['name' => 'z/photo.jpg'],
+            ['DOCUMENT_ROOT' => $this->site, 'SCRIPT_NAME' => '/iar/index.php'],
+            null,
+            $router,
+        );
+
+        self::assertSame($this->site . '/nested/www/photo.jpg', $path);
+    }
+
+    public function testOriginalFileReadsAliasesPathFromBrokenConfig(): void
+    {
+        $this->writeAliases(['aliases' => ['z' => 'nested/www']]);
+        // Конфиг сломан (нет каталога оригиналов), но путь к маршрутам читаем.
+        file_put_contents($this->configFile, '<?php return ' . var_export([
+            'images_base_dir' => $this->site . '/missing',
+            'aliases_file' => $this->site . '/aliases.json',
+        ], true) . ';');
+
+        $path = Bootstrap::originalFile(
+            ['name' => 'z/photo.jpg'],
+            ['DOCUMENT_ROOT' => $this->site, 'SCRIPT_NAME' => '/iar/index.php'],
+            null,
+            null,
+            $this->configFile,
+        );
+
+        self::assertSame($this->site . '/nested/www/photo.jpg', $path);
+    }
+
+    public function testEmergencyFallbackServesAliasedOriginal(): void
+    {
+        $this->writeAliases(['aliases' => ['z' => 'nested/www']]);
+        $this->writeConfig(['images_base_dir' => $this->site . '/does-not-exist']);
+        $sapi = $this->run(['name' => 'z/photo.jpg', 'w' => '120']);
+
+        self::assertSame(200, $sapi->status);
+        self::assertSame('original', $sapi->headerValue('X-Iar-Fallback'));
+        self::assertSame(file_get_contents($this->site . '/nested/www/photo.jpg'), $sapi->body);
+    }
+
+    public function testEmergencyRouterToleratesThrowingConfig(): void
+    {
+        file_put_contents($this->configFile, '<?php throw new RuntimeException("broken");');
+        $sapi = $this->run(['name' => 'photo.jpg', 'w' => '120']);
+
+        self::assertSame(200, $sapi->status);
+        self::assertSame('original', $sapi->headerValue('X-Iar-Fallback'));
+    }
+
+    public function testEmergencyRouterIgnoresNonStringAliasesPath(): void
+    {
+        $this->writeConfig([
+            'images_base_dir' => $this->site . '/does-not-exist',
+            'aliases_file' => ['not a string'],
+        ]);
+        $sapi = $this->run(['name' => 'photo.jpg', 'w' => '120']);
+
+        self::assertSame(200, $sapi->status);
+        self::assertSame('original', $sapi->headerValue('X-Iar-Fallback'));
+    }
+
+    public function testFatalHandlerResolvesAliasFromDefaultFile(): void
+    {
+        // Аварийный shutdown не знает путь к конфигу: работает файл рядом с index.php.
+        $router = PathRouter::fromFile(dirname(__DIR__, 2) . '/aliases.json', $this->site . '/');
+        $sapi = new TestSapi();
+
+        try {
+            Bootstrap::handleFatal(
+                $sapi,
+                ['type' => E_ERROR, 'message' => 'oom'],
+                ['name' => 'z/photo.jpg'],
+                ['DOCUMENT_ROOT' => $this->site, 'SCRIPT_NAME' => '/iar/index.php'],
+            );
+        } catch (\App\Tests\Support\ExitCalled) {
+        }
+
+        // В площадке нет каталога z/s/d/f — ожидаем нейтральный 500, а не падение.
+        self::assertSame(500, $sapi->status);
+        self::assertFalse($router->isEmpty());
     }
 }

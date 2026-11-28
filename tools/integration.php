@@ -70,6 +70,8 @@ function it_config(array $scenario, string $site): array
         'log_dir' => $site . '/log',
         'logging' => false,
         'redirect_to_cache' => false,
+        // Площадка изолирована от боевого aliases.json из корня репозитория.
+        'aliases_file' => $site . '/aliases.json',
     ], $scenario['config'] ?? []);
 }
 
@@ -87,6 +89,15 @@ function it_setup(array $scenario, string $site): void
     it_remove($site);
     Fixtures::ensure($site);
     it_write_config(it_config($scenario, $site), $site);
+
+    // Маршруты: массив кодируется в JSON, строка пишется как есть
+    // (так проверяется и заведомо сломанный файл).
+    $aliases = $scenario['aliases'] ?? null;
+    if (is_array($aliases) && $aliases !== []) {
+        file_put_contents($site . '/aliases.json', (string) json_encode($aliases, JSON_UNESCAPED_SLASHES));
+    } elseif (is_string($aliases) && $aliases !== '') {
+        file_put_contents($site . '/aliases.json', $aliases);
+    }
 }
 
 /** Действие перед шагом + сборка задания для step.php. */

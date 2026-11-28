@@ -10,6 +10,7 @@ use App\Domain\Gravity;
 use App\Domain\Mode;
 use App\Domain\ResizeParams;
 use App\Domain\Side;
+use App\Http\PathRouter;
 use App\Infrastructure\CacheKey;
 use App\Tests\Support\Factory;
 use IarLegacyError;
@@ -52,6 +53,7 @@ final class LegacyTest extends TestCase
             'cache_dir' => $this->site . '/cache',
             'log_dir' => $this->site . '/log',
             'redirect_to_cache' => false,
+            'aliases_file' => $this->site . '/aliases.json',
         ], $overrides);
 
         $file = $this->site . '/iar-config.php';
@@ -1446,5 +1448,291 @@ final class LegacyTest extends TestCase
         }
 
         return array_values(array_filter(explode("\n", (string) file_get_contents($files[0])), static fn ($l) => $l !== ''));
+    }
+
+
+    // =====================================================================
+    // Маршруты из aliases.json: паритет с основным движком
+    // =====================================================================
+
+    /** @param array<string,mixed> $json */
+    private function aliases(array $json): string
+    {
+        $file = $this->site . '/aliases.json';
+        file_put_contents($file, (string) json_encode($json));
+
+        return $file;
+    }
+
+    /** @return array<string,mixed> */
+    private function sampleAliases(): array
+    {
+        return [
+            'aliases' => ['z' => '/z/s/d/f/', 'img' => 'nested/www'],
+            'presets' => ['1000' => ['w' => 1000], 'thumb' => ['w' => 60, 'h' => 40, 'm' => 'cover']],
+            'macros' => ['enabled' => true, 'width' => 'x-', 'height' => 'y-'],
+        ];
+    }
+
+    public function testLegacyRouterMatchesMainEngine(): void
+    {
+        $file = $this->aliases($this->sampleAliases());
+        $legacy = iar_legacy_router($file, $this->site . '/');
+        $modern = PathRouter::fromFile($file, $this->site . '/');
+
+        $paths = [
+            'z/file.png', 'img/photo.jpg', '1000/photo.jpg', 'thumb/photo.jpg',
+            'x-2000/photo.jpg', 'y-1000/photo.jpg', 'img/x-640/photo.jpg',
+            'plain.jpg', 'nested/www/photo.jpg', 'unknown/x-10/a.png', 'x-/a.png',
+            'x-0/a.png', 'x-1234567/a.png', 'thumb/nested/photo.jpg', '',
+        ];
+
+        foreach ($paths as $path) {
+            $a = iar_legacy_route($legacy, $path);
+            $b = $modern->route($path);
+
+            self::assertSame($b->name, $a['name'], 'name: ' . $path);
+            self::assertSame($b->original, $a['original'], 'original: ' . $path);
+            self::assertSame($b->params, $a['params'], 'params: ' . $path);
+            self::assertSame($b->alias, $a['alias'], 'alias: ' . $path);
+            self::assertSame($b->preset, $a['preset'], 'preset: ' . $path);
+        }
+    }
+
+    public function testLegacyRouterNormalizesUnsafeDefinitions(): void
+    {
+        $file = $this->aliases([
+            'aliases' => ['_comment' => 'x', '../up' => 'x', 'ok' => '../up', 'good' => '/nested/www/', 'root' => '/'],
+            'presets' => ['bad' => ['nope' => 1], 'a/b' => ['w' => 1], 'good' => ['w' => '60', 'x' => [1]]],
+            'macros' => ['width' => 'x/', 'height' => 5],
+        ]);
+        $legacy = iar_legacy_router($file, $this->site . '/');
+        $modern = PathRouter::fromFile($file, $this->site . '/');
+
+        foreach (['ok/a.png', 'good/a.png', 'root/a.png', 'bad/a.png', 'good/x-70/a.png', 'y-70/a.png'] as $path) {
+            $a = iar_legacy_route($legacy, $path);
+            $b = $modern->route($path);
+            self::assertSame($b->name, $a['name'], 'name: ' . $path);
+            self::assertSame($b->params, $a['params'], 'params: ' . $path);
+        }
+    }
+
+    public function testLegacyRouterReportsBrokenJson(): void
+    {
+        $file = $this->site . '/aliases.json';
+        file_put_contents($file, '{bad');
+        $router = iar_legacy_router($file, $this->site . '/');
+
+        self::assertSame('Aliases file must contain a JSON object.', $router['error']);
+        self::assertSame('z/a.png', iar_legacy_route($router, 'z/a.png')['name']);
+    }
+
+    public function testLegacyRouterMissingFileIsSilent(): void
+    {
+        $router = iar_legacy_router($this->site . '/absent.json', $this->site . '/');
+
+        self::assertNull($router['error']);
+        self::assertSame([], $router['aliases']);
+        self::assertSame('z/a.png', iar_legacy_route($router, 'z/a.png')['name']);
+    }
+
+    public function testLegacyRouterUnreadableFile(): void
+    {
+        $file = $this->aliases([]);
+        chmod($file, 0000);
+        clearstatcache();
+        if (@file_get_contents($file) !== false) {
+            chmod($file, 0644);
+            self::markTestSkipped('Права не ограничивают чтение (запуск от root).');
+        }
+
+        try {
+            $router = iar_legacy_router($file, $this->site . '/');
+            self::assertSame('Aliases file is not readable.', $router['error']);
+        } finally {
+            chmod($file, 0644);
+        }
+    }
+
+    public function testLegacyRouterDisabledByFlag(): void
+    {
+        $raw = $this->sampleAliases();
+        $raw['enabled'] = false;
+        $router = iar_legacy_router($this->aliases($raw), $this->site . '/');
+
+        self::assertSame([], $router['aliases']);
+        self::assertFalse($router['macros']);
+    }
+
+    public function testLegacyMacroCanBeDisabled(): void
+    {
+        $router = iar_legacy_router($this->aliases(['macros' => ['enabled' => false]]), $this->site . '/');
+
+        self::assertSame('x-10/a.png', iar_legacy_route($router, 'x-10/a.png')['name']);
+    }
+
+    public function testLegacyCustomPrefixes(): void
+    {
+        $router = iar_legacy_router($this->aliases(['macros' => ['width' => 'w', 'height' => 'h_']]), $this->site . '/');
+
+        self::assertSame(['w' => '800'], iar_legacy_route($router, 'w800/a.png')['params']);
+        self::assertSame(['h' => '600'], iar_legacy_route($router, 'h_600/a.png')['params']);
+    }
+
+    public function testLegacyLiteralFileWins(): void
+    {
+        mkdir($this->site . '/thumb', 0777, true);
+        copy($this->site . '/photo.jpg', $this->site . '/thumb/photo.jpg');
+        $router = iar_legacy_router($this->aliases($this->sampleAliases()), $this->site . '/');
+
+        self::assertSame('thumb/photo.jpg', iar_legacy_route($router, 'thumb/photo.jpg')['name']);
+    }
+
+    public function testLegacyMergeParamsKeepsExplicitQuery(): void
+    {
+        $merged = iar_legacy_merge_params(['w' => '20', 'h' => '', 'm' => 0], ['w' => '100', 'h' => '50', 'm' => 'cover']);
+
+        self::assertSame('20', $merged['w']);
+        self::assertSame('50', $merged['h']);
+        self::assertSame(0, $merged['m']);
+    }
+
+    public function testLegacyAliasAndMacroResizeImage(): void
+    {
+        $this->aliases($this->sampleAliases());
+        $response = $this->plan(['name' => 'img/x-60/photo.jpg']);
+
+        self::assertSame(200, $response['status']);
+        self::assertSame([60, 40], $this->size($this->bytes($response)));
+        self::assertSame('legacy', $this->header($response, 'X-Iar-Engine'));
+    }
+
+    public function testLegacyPresetCacheKeyMatchesPlainQuery(): void
+    {
+        $this->aliases($this->sampleAliases());
+        $cfg = $this->cfg();
+        $viaPreset = $this->plan(['name' => 'thumb/photo.jpg'], $cfg);
+        $viaQuery = $this->plan(['name' => 'photo.jpg', 'w' => '60', 'h' => '40', 'm' => 'cover'], $cfg);
+
+        self::assertSame('miss', $this->header($viaPreset, 'X-Iar-Cache'));
+        self::assertSame('hit', $this->header($viaQuery, 'X-Iar-Cache'));
+        self::assertSame($viaPreset['file'], $viaQuery['file']);
+    }
+
+    public function testLegacyQueryWinsOverPreset(): void
+    {
+        $this->aliases($this->sampleAliases());
+        $response = $this->plan(['name' => 'thumb/photo.jpg', 'w' => '30']);
+
+        // Режим cover пришёл из пресета, ширина — из query: точный размер 30x40.
+        self::assertSame([30, 40], $this->size($this->bytes($response)));
+    }
+
+    public function testLegacyAliasedFailureServesOriginalInline(): void
+    {
+        $this->aliases(['aliases' => ['c' => '']]);
+        $cfg = $this->cfg();
+        $response = $this->plan(['name' => 'c/corrupt.jpg', 'w' => '40'], $cfg);
+
+        self::assertSame(200, $response['status']);
+        self::assertNull($this->header($response, 'Location'));
+        self::assertSame('original', $this->header($response, 'X-Iar-Fallback'));
+        self::assertSame('legacy', $this->header($response, 'X-Iar-Engine'));
+        self::assertSame(file_get_contents($this->site . '/corrupt.jpg'), $this->bytes($response));
+    }
+
+    public function testLegacyPresetOnlyFailureStillRedirects(): void
+    {
+        $this->aliases($this->sampleAliases());
+        $response = $this->plan(['name' => 'thumb/corrupt.jpg', 'w' => '40']);
+
+        self::assertSame(302, $response['status']);
+        self::assertSame('/corrupt.jpg', $this->header($response, 'Location'));
+    }
+
+    public function testLegacyBrokenAliasesLoggedOnce(): void
+    {
+        file_put_contents($this->site . '/aliases.json', '{bad');
+        $cfg = $this->cfg(['logging' => true]);
+        $response = $this->plan(['name' => 'photo.jpg', 'w' => '20'], $cfg);
+
+        self::assertSame(200, $response['status']);
+        $lines = $this->logLines();
+        self::assertCount(1, $lines);
+        self::assertStringContainsString('"stage":"aliases"', $lines[0]);
+    }
+
+    public function testLegacyEmergencyFallbackResolvesAlias(): void
+    {
+        $this->aliases(['aliases' => ['z' => 'nested/www']]);
+        $response = iar_legacy_fallback(
+            ['name' => 'z/photo.jpg'],
+            $this->server(),
+            $this->cfg(),
+            false,
+            'сбой конфига'
+        );
+
+        self::assertSame(200, $response['status']);
+        self::assertSame(file_get_contents($this->site . '/nested/www/photo.jpg'), $this->bytes($response));
+    }
+
+    public function testLegacyEmergencyFallbackWithoutAliasesFileKey(): void
+    {
+        $cfg = $this->cfg();
+        unset($cfg['aliases_file']);
+        $response = iar_legacy_fallback(['name' => 'photo.jpg'], $this->server(), $cfg, false, 'сбой');
+
+        self::assertSame(200, $response['status']);
+        self::assertSame('original', $this->header($response, 'X-Iar-Fallback'));
+    }
+
+
+    public function testLegacyMacrosDisabledButPresetsActive(): void
+    {
+        $router = iar_legacy_router($this->aliases([
+            'presets' => ['thumb' => ['w' => 60]],
+            'macros' => ['enabled' => false],
+        ]), $this->site . '/');
+
+        self::assertSame('x-10/a.png', iar_legacy_route($router, 'x-10/a.png')['name']);
+        self::assertSame(['w' => '60'], iar_legacy_route($router, 'thumb/a.png')['params']);
+    }
+
+    public function testLegacyRejectsSchemesNullBytesAndDriveLetters(): void
+    {
+        $router = iar_legacy_router($this->aliases([
+            'aliases' => [
+                'scheme' => 'http://evil/x',
+                'nul' => "a\0b",
+                'drive' => 'C:\\files',
+                'dot' => './here',
+                'up' => '../up',
+                'badkey' => 42,
+            ],
+            'macros' => ['enabled' => false],
+        ]), $this->site . '/');
+
+        self::assertSame([], $router['aliases']);
+        self::assertSame('scheme/a.png', iar_legacy_route($router, 'scheme/a.png')['name']);
+    }
+
+    public function testLegacyUnderscoreKeysAreComments(): void
+    {
+        $router = iar_legacy_router($this->aliases([
+            '_readme' => array('комментарий'),
+            'presets' => array('_note' => array('w' => 10), 'thumb' => array('w' => 20)),
+            'macros' => array('enabled' => false),
+        ]), $this->site . '/');
+
+        self::assertSame('_note/a.png', iar_legacy_route($router, '_note/a.png')['name']);
+        self::assertSame(array('w' => '20'), iar_legacy_route($router, 'thumb/a.png')['params']);
+    }
+
+    public function testLegacyAliasToRootDirectory(): void
+    {
+        $router = iar_legacy_router($this->aliases(['aliases' => ['root' => '/']]), $this->site . '/');
+
+        self::assertSame('photo.jpg', iar_legacy_route($router, 'root/photo.jpg')['name']);
     }
 }

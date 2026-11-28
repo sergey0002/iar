@@ -11,6 +11,7 @@ use App\Domain\Side;
 use App\Exception\ForbiddenException;
 use App\Exception\NotFoundException;
 use App\Exception\UnsupportedFormatException;
+use App\Http\PathRouter;
 use App\Http\Request;
 use App\Infrastructure\CacheStore;
 use App\Tests\Support\Factory;
@@ -54,14 +55,27 @@ final class ApplicationTest extends TestCase
         return Factory::config($this->site, $overrides);
     }
 
-    private function request(array $get = [], array $server = []): Request
+    private function request(array $get = [], array $server = [], ?PathRouter $router = null): Request
     {
-        return Factory::request($this->site, $get, $server);
+        return Factory::request($this->site, $get, $server, $router);
     }
 
-    private function handle(Application $app, array $get = [], array $server = []): TestSapi
+    private function handle(
+        Application $app,
+        array $get = [],
+        array $server = [],
+        ?PathRouter $router = null,
+    ): TestSapi {
+        return Factory::send($app->handle($this->request($get, $server, $router)));
+    }
+
+    /** Маршруты: «z» скрывает реальный каталог, «thumb» — пресет. */
+    private function router(): PathRouter
     {
-        return Factory::send($app->handle($this->request($get, $server)));
+        return Factory::router($this->site, [
+            'aliases' => ['z' => 'nested/www'],
+            'presets' => ['thumb' => ['w' => 60, 'h' => 40, 'm' => 'cover']],
+        ]);
     }
 
     public function testFirstRequestGeneratesAndServesImage(): void
@@ -800,5 +814,109 @@ final class ApplicationTest extends TestCase
         self::assertSame(302, $sapi->status);
         self::assertSame('/anim.gif', $sapi->headerValue('Location'));
         self::assertSame('no-store', $sapi->headerValue('Cache-Control'));
+    }
+
+    // -----------------------------------------------------------------
+    // Маршруты из aliases.json в оркестрации
+    // -----------------------------------------------------------------
+
+    public function testAliasAndMacroProduceResizedVariant(): void
+    {
+        $resizer = new FakeResizer();
+        $sapi = $this->handle($this->app([], $resizer), ['name' => 'z/x-60/photo.jpg'], [], $this->router());
+
+        self::assertSame(200, $sapi->status);
+        self::assertSame($this->site . '/nested/www/photo.jpg', $resizer->lastSource);
+        self::assertSame(60, $resizer->lastParams?->width);
+        self::assertSame('miss', $this->logger->lastEvent());
+        self::assertSame('z', $this->logger->lastContext()['alias'] ?? null);
+        self::assertSame('x-60', $this->logger->lastContext()['preset'] ?? null);
+        self::assertSame('60', $this->logger->lastContext()['params']['w'] ?? null);
+    }
+
+    public function testPresetParametersReachResizer(): void
+    {
+        $resizer = new FakeResizer();
+        $this->handle($this->app([], $resizer), ['name' => 'thumb/photo.jpg'], [], $this->router());
+
+        self::assertSame(60, $resizer->lastParams?->width);
+        self::assertSame(40, $resizer->lastParams?->height);
+        self::assertSame('cover', $resizer->lastParams?->mode->value);
+    }
+
+    public function testQueryOverridesPresetInApplication(): void
+    {
+        $resizer = new FakeResizer();
+        $this->handle($this->app([], $resizer), ['name' => 'thumb/photo.jpg', 'w' => '20'], [], $this->router());
+
+        self::assertSame(20, $resizer->lastParams?->width);
+    }
+
+    /** Псевдоним скрывает реальный путь: редиректить некуда, отдаём тело. */
+    public function testAliasedFailureServesOriginalInline(): void
+    {
+        $resizer = new FakeResizer();
+        $resizer->failure = 'decoder exploded';
+        $sapi = $this->handle($this->app([], $resizer), ['name' => 'z/photo.jpg', 'w' => '10'], [], $this->router());
+
+        self::assertSame(200, $sapi->status);
+        self::assertNull($sapi->headerValue('Location'));
+        self::assertSame('original', $sapi->headerValue('X-Iar-Fallback'));
+        self::assertSame('intervention', $sapi->headerValue('X-Iar-Engine'));
+        self::assertSame('image/jpeg', $sapi->headerValue('Content-Type'));
+        self::assertSame('no-store', $sapi->headerValue('Cache-Control'));
+        self::assertSame('nosniff', $sapi->headerValue('X-Content-Type-Options'));
+        self::assertSame(
+            (string) filesize($this->site . '/nested/www/photo.jpg'),
+            $sapi->headerValue('Content-Length'),
+        );
+        self::assertSame(file_get_contents($this->site . '/nested/www/photo.jpg'), $sapi->body);
+
+        $context = $this->logger->lastContext();
+        self::assertSame('fail', $this->logger->lastEvent());
+        self::assertSame(200, $context['status'] ?? null);
+        self::assertArrayHasKey('redirect', $context);
+        self::assertNull($context['redirect']);
+        self::assertSame('z', $context['alias'] ?? null);
+    }
+
+    public function testAliasedFailureHeadHasNoBody(): void
+    {
+        $resizer = new FakeResizer();
+        $resizer->failure = 'boom';
+        $sapi = $this->handle(
+            $this->app([], $resizer),
+            ['name' => 'z/photo.jpg', 'w' => '10'],
+            ['REQUEST_METHOD' => 'HEAD'],
+            $this->router(),
+        );
+
+        self::assertSame(200, $sapi->status);
+        self::assertSame('', $sapi->body);
+        self::assertSame('original', $sapi->headerValue('X-Iar-Fallback'));
+    }
+
+    /** Без псевдонима реальное имя видно в URL — прежний редирект. */
+    public function testPresetOnlyFailureStillRedirects(): void
+    {
+        $resizer = new FakeResizer();
+        $resizer->failure = 'boom';
+        $sapi = $this->handle($this->app([], $resizer), ['name' => 'thumb/photo.jpg'], [], $this->router());
+
+        self::assertSame(302, $sapi->status);
+        self::assertSame('/photo.jpg', $sapi->headerValue('Location'));
+        self::assertSame('thumb', $this->logger->lastContext()['preset'] ?? null);
+    }
+
+    public function testAliasedSvgFailureKeepsCsp(): void
+    {
+        $resizer = new FakeResizer();
+        $resizer->failure = 'boom';
+        $router = Factory::router($this->site, ['aliases' => ['i' => '']]);
+        $sapi = $this->handle($this->app([], $resizer), ['name' => 'i/icon.svg', 'w' => '10'], [], $router);
+
+        self::assertSame(200, $sapi->status);
+        self::assertSame('image/svg+xml', $sapi->headerValue('Content-Type'));
+        self::assertNotNull($sapi->headerValue('Content-Security-Policy'));
     }
 }

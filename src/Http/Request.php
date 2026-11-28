@@ -36,15 +36,21 @@ final class Request
         public readonly string $requestUri,
         public readonly string $scriptName,
         public readonly string $documentRoot,
+        /** Сырой query-набор как пришёл от клиента. */
         public readonly array $query,
+        /** Итоговые параметры: query поверх параметров из пути. */
+        public readonly array $params,
+        public readonly Route $route,
     ) {
     }
 
     /**
      * @param array<string,mixed> $get
      * @param array<string,mixed> $server
+     * @param PathRouter|null $router маршруты из aliases.json (псевдонимы,
+     *                                пресеты, макросы последней папки)
      */
-    public static function fromArray(array $get, array $server): self
+    public static function fromArray(array $get, array $server, ?PathRouter $router = null): self
     {
         $method = strtoupper(self::scalarString($server, 'REQUEST_METHOD', 'GET'));
         if ($method !== 'GET' && $method !== 'HEAD') {
@@ -56,16 +62,20 @@ final class Request
         $documentRoot = self::scalarString($server, 'DOCUMENT_ROOT', '');
 
         $name = self::resolveName($get, $scriptName, $requestUri);
+        $route = ($router ?? PathRouter::disabled())->route($name);
 
-        [$crop, $multiple] = self::resolveCrop($get);
+        // Параметры из пути — это значения по умолчанию: явный ?w= всегда важнее.
+        $params = self::mergeParams($get, $route->params);
+
+        [$crop, $multiple] = self::resolveCrop($params);
 
         return new self(
-            name: $name,
-            width: self::dimension($get, 'w'),
-            height: self::dimension($get, 'h'),
-            mode: self::enumParam($get, 'm', Mode::fromName(...)),
-            gravity: self::enumParam($get, 'g', Gravity::fromName(...)),
-            format: self::enumParam($get, 'fm', Format::fromName(...)),
+            name: $route->name,
+            width: self::dimension($params, 'w'),
+            height: self::dimension($params, 'h'),
+            mode: self::enumParam($params, 'm', Mode::fromName(...)),
+            gravity: self::enumParam($params, 'g', Gravity::fromName(...)),
+            format: self::enumParam($params, 'fm', Format::fromName(...)),
             crop: $crop,
             multipleCropParams: $multiple,
             method: $method,
@@ -77,7 +87,29 @@ final class Request
             scriptName: $scriptName,
             documentRoot: $documentRoot,
             query: $get,
+            params: $params,
+            route: $route,
         );
+    }
+
+    /**
+     * Параметры пути не перекрывают явные параметры запроса; пустое
+     * значение в запросе («?w=») считается отсутствующим.
+     *
+     * @param array<string,mixed> $get
+     * @param array<string,string> $path
+     * @return array<string,mixed>
+     */
+    private static function mergeParams(array $get, array $path): array
+    {
+        foreach ($path as $key => $value) {
+            $current = $get[$key] ?? null;
+            if (!array_key_exists($key, $get) || (is_string($current) && trim($current) === '')) {
+                $get[$key] = $value;
+            }
+        }
+
+        return $get;
     }
 
     public function isHead(): bool

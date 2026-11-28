@@ -8,6 +8,7 @@ use App\Application;
 use App\Config;
 use App\Domain\ResizeService;
 use App\Domain\ResizerInterface;
+use App\Http\PathRouter;
 use App\Http\Request;
 use App\Infrastructure\CacheStore;
 use App\Infrastructure\DebugLogger;
@@ -47,6 +48,8 @@ final class Factory
             'log_dir' => $site . '/log',
             'logging' => false,
             'redirect_to_cache' => false,
+            // Тесты не должны зависеть от боевого aliases.json репозитория.
+            'aliases_file' => $site . '/aliases.json',
         ], $overrides));
     }
 
@@ -71,8 +74,12 @@ final class Factory
      * @param array<string,mixed> $get
      * @param array<string,mixed> $server
      */
-    public static function request(string $site, array $get = [], array $server = []): Request
-    {
+    public static function request(
+        string $site,
+        array $get = [],
+        array $server = [],
+        ?PathRouter $router = null,
+    ): Request {
         return Request::fromArray(
             array_merge(['name' => 'photo.jpg'], $get),
             array_merge([
@@ -82,7 +89,20 @@ final class Factory
                 'DOCUMENT_ROOT' => $site,
                 'HTTP_ACCEPT' => '',
             ], $server),
+            $router,
         );
+    }
+
+    /**
+     * Записать aliases.json на площадке и вернуть готовый маршрутизатор.
+     *
+     * @param array<string,mixed> $json
+     */
+    public static function router(string $site, array $json): PathRouter
+    {
+        file_put_contents($site . '/aliases.json', (string) json_encode($json));
+
+        return PathRouter::fromFile($site . '/aliases.json', $site . '/');
     }
 
     public static function cleanup(): void

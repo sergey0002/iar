@@ -159,6 +159,43 @@ composer install --no-dev --optimize-autoloader
 
 ---
 
+### Short paths: aliases, presets and macros
+
+A single `aliases.json` next to `index.php` turns a short URL into the real file
+path plus processing parameters. The file ships with the repo and works as is.
+
+```html
+<!-- Directory alias: z → /z/s/d/f/ -->
+<img src="/iar/z/file.png">
+
+<!-- Preset folder: 1000 = max width 1000 -->
+<img src="/iar/1000/file.png">
+
+<!-- Macros: x-2000 = width only, y-1000 = height only -->
+<img src="/iar/x-2000/file.png">
+<img src="/iar/y-1000/file.png">
+
+<!-- Alias and preset together -->
+<img src="/iar/z/thumb/file.png">
+```
+
+```json
+{
+    "aliases":  {"z": "/z/s/d/f/", "img": "/assets/images/"},
+    "presets":  {"1000": {"w": 1000}, "thumb": {"w": 300, "h": 300, "m": "cover"}},
+    "macros":   {"enabled": true, "width": "x-", "height": "y-"}
+}
+```
+
+Key rules: a real file always wins over a virtual route, an explicit `?w=` wins
+over a preset folder, a preset wins over a macro, and only the **last folder**
+before the file name can be virtual. Broken JSON never breaks images — routing
+switches itself off and logs the reason.
+
+Details, precedence and security: [**docs/path-routing.md**](docs/path-routing.md) (in Russian).
+
+---
+
 ## 🔗 URL API — Full Parameter Reference
 
 ### Core Parameters
@@ -265,6 +302,7 @@ return [
     'images_base_dir'    => __DIR__ . '/../',   // validated on load; a bad path is a hard error
     'allowed_extensions' => ['jpg', 'jpeg', 'gif', 'png', 'webp', 'avif', 'svg'],
     'cache_dir'          => __DIR__ . '/cache',
+    'aliases_file'       => __DIR__ . '/aliases.json', // routing: aliases, presets, macros
 
     // === Logging ===
     'logging' => false,   // debug log; OFF by default
@@ -302,6 +340,7 @@ return [
 | `logging` | bool | Debug request log. **`false` by default.** |
 | `log_dir` | path | Directory for log files (one file per day). |
 | `log_level` | `error` / `info` / `debug` | `error` (default) — failures with a reason only; `info` — plus hit/miss; `debug` — plus request parameters. At `error` no metrics are collected, so the hot path does no extra disk calls. |
+| `aliases_file` | path | Path to the routing JSON (directory aliases, preset folders, last-folder macros). Defaults to `aliases.json` next to `index.php`. See [docs/path-routing.md](docs/path-routing.md). |
 
 ### Cache Mode Comparison
 
@@ -319,6 +358,7 @@ return [
 | :--- | :--- |
 | **Resize** | Proportional resize by width (`w`) or height (`h`). Does not upscale small images. |
 | **Smart Crop** | `cover` mode with configurable focal point (`g`). |
+| **Path routing** | Directory aliases, preset folders and `x-`/`y-` macros from `aliases.json`. |
 | **Edge Crop** | Crop px or % from any edge before processing (`ct`, `cr`, `cb`, `cl`). |
 | **Auto WebP/AVIF** | Transparent conversion to modern formats without changing the URL. |
 | **Transparent Caching** | First request = processing. All subsequent = instant from cache. |
@@ -415,7 +455,13 @@ composer mutation          # Infection, MSI >= 90
 Covered: parameter validation, crop boundaries, cache-key collisions, format
 whitelists, GIF animation, headers/304/redirects, invalidation, **full cache
 wipe → regeneration**, DoS limits, SVG CSP, cache write failures, worker races,
-fatal errors. Report: [`docs/implementation-report.md`](docs/implementation-report.md).
+fatal errors, and `aliases.json` routing (precedence, cross-engine parity,
+broken JSON).
+
+Current results: **663 unit tests** (662 passed, 1 skipped — GD without AVIF),
+**62 of 62** HTTP scenarios, line coverage **1449/1449 = 100 %**, PHP **7.0 → 8.4**
+with no failures. Reports: [`docs/policies-audit.md`](docs/policies-audit.md)
+and [`docs/implementation-report.md`](docs/implementation-report.md).
 
 ---
 
@@ -424,7 +470,7 @@ fatal errors. Report: [`docs/implementation-report.md`](docs/implementation-repo
 ### Apache
 
 `.htaccess` is already configured: `-Indexes`, denial of service files and
-directories (`config.php`, `log/`, `vendor/`, `src/`, `tests/`, dotfiles,
+directories (`config.php`, `aliases.json`, `log/`, `vendor/`, `src/`, `tests/`, dotfiles,
 `.git/`), cache passthrough, `[B]` in the rewrite rule (names with `&`),
 `nosniff` and a CSP for SVG. Requires `mod_rewrite` and `AllowOverride All`.
 
@@ -445,7 +491,7 @@ location = /iar/index.php {
     fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
 }
 
-location ~ ^/iar/(config\.php|composer\.|src/|tests/|tools/|log/|vendor/|\.) {
+location ~ ^/iar/(config\.php|aliases\.json|composer\.|src/|tests/|tools/|log/|vendor/|\.) {
     deny all;
 }
 ```
@@ -548,6 +594,7 @@ reported in the `X-Iar-Engine` header.
 - [Remediation plan](docs/remediation-plan.md)
 - [Implementation & test report](docs/implementation-report.md)
 - [Product policy audit](docs/policies-audit.md)
+- [Path routing: aliases, presets, macros](docs/path-routing.md) (in Russian)
 
 ---
 

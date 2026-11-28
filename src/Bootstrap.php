@@ -4,10 +4,11 @@ declare(strict_types=1);
 
 namespace App;
 
-use App\Domain\Format;
 use App\Domain\ResizeService;
 use App\Exception\IarException;
 use App\Http\ErrorResponse;
+use App\Http\OriginalResponse;
+use App\Http\PathRouter;
 use App\Http\Request;
 use App\Http\Response;
 use App\Http\SapiInterface;
@@ -54,6 +55,16 @@ final class Bootstrap
                 ? new DebugLogger($config->logDir, $config->logLevel)
                 : new NullLogger();
 
+            $router = PathRouter::fromFile($config->aliasesFile, $config->imagesBaseDir);
+            if ($router->error() !== null) {
+                $logger->log('fail', [
+                    'reason' => $router->error(),
+                    'status' => 0,
+                    'url' => (string) ($server['REQUEST_URI'] ?? ''),
+                    'stage' => 'aliases',
+                ]);
+            }
+
             $application = new Application(
                 $config,
                 new ResizeService($config),
@@ -61,7 +72,7 @@ final class Bootstrap
                 $logger,
             );
 
-            $response = $application->handle(Request::fromArray($get, $server));
+            $response = $application->handle(Request::fromArray($get, $server, $router));
         } catch (IarException $e) {
             // Осмысленный статус (400/403/404/405/413) сохраняем.
             // Серверный сбой конфигурации — отдаём оригинал.
@@ -69,13 +80,13 @@ final class Bootstrap
                 // Конфиг не прошёл валидацию, но настройки лога из него
                 // прочитать можно — причина сбоя должна попасть в лог.
                 $logger = self::emergencyLogger($configPath);
-                $response = self::fallbackResponse($get, $server, $headOnly, $logger, $e->getMessage());
+                $response = self::fallbackResponse($get, $server, $headOnly, $logger, $e->getMessage(), $configPath);
             } else {
                 $response = ErrorResponse::from($e, $headOnly);
             }
         } catch (\Throwable $e) {
             $logger = self::emergencyLogger($configPath);
-            $response = self::fallbackResponse($get, $server, $headOnly, $logger, $e->getMessage());
+            $response = self::fallbackResponse($get, $server, $headOnly, $logger, $e->getMessage(), $configPath);
         }
 
         $response->send($sapi);
@@ -93,10 +104,11 @@ final class Bootstrap
         bool $headOnly,
         LoggerInterface $logger,
         string $reason,
+        ?string $configFile = null,
     ): Response {
         error_log('[iar] ' . $reason);
 
-        $original = self::originalFile($get, $server);
+        $original = self::originalFile($get, $server, null, null, $configFile);
 
         $logger->log('fail', [
             'reason' => $reason,
@@ -124,10 +136,32 @@ final class Bootstrap
      */
     private static function emergencyLogger(string $file): LoggerInterface
     {
+        // Чтение конфига уже защищено внутри rawConfig(), дальше — только
+        // проверки типов, поэтому дополнительный try/catch не нужен.
+        $raw = self::rawConfig($file);
+        if ($raw === null || ($raw['logging'] ?? false) !== true) {
+            return new NullLogger();
+        }
+
+        $dir = is_string($raw['log_dir'] ?? null) ? $raw['log_dir'] : dirname($file) . '/log';
+        $level = $raw['log_level'] ?? 'error';
+        $level = in_array($level, ['error', 'info', 'debug'], true) ? $level : 'error';
+
+        return new DebugLogger($dir, $level);
+    }
+
+    /**
+     * Сырой конфиг без валидации: нужен на аварийном пути, где штатная
+     * загрузка уже упала, но настройки (лог, файл маршрутов) ещё читаемы.
+     *
+     * @return array<string,mixed>|null
+     */
+    private static function rawConfig(string $file): ?array
+    {
         try {
             $raw = require $file;
             if (!is_array($raw)) {
-                return new NullLogger();
+                return null;
             }
 
             $local = dirname($file) . '/config.local.php';
@@ -138,41 +172,34 @@ final class Bootstrap
                 }
             }
 
-            if (($raw['logging'] ?? false) !== true) {
-                return new NullLogger();
-            }
-
-            $dir = is_string($raw['log_dir'] ?? null) ? $raw['log_dir'] : dirname($file) . '/log';
-            $level = $raw['log_level'] ?? 'error';
-            $level = in_array($level, ['error', 'info', 'debug'], true) ? $level : 'error';
-
-            return new DebugLogger($dir, $level);
+            return $raw;
         } catch (\Throwable) {
-            return new NullLogger();
+            return null;
         }
+    }
+
+    /**
+     * Маршруты для аварийного пути: путь к aliases.json берём из сырого
+     * конфига, а если и он нечитаем — используем файл рядом с index.php.
+     */
+    private static function emergencyRouter(?string $configFile, string $base): PathRouter
+    {
+        $file = dirname(__DIR__) . '/aliases.json';
+        if ($configFile !== null) {
+            $raw = self::rawConfig($configFile);
+            $custom = $raw['aliases_file'] ?? null;
+            if (is_string($custom) && $custom !== '') {
+                $file = $custom;
+            }
+        }
+
+        return PathRouter::fromFile($file, $base);
     }
 
     /** Ответ с оригиналом: без обработки, без кеша, с теми же заголовками безопасности. */
     public static function originalResponse(string $path, bool $headOnly = false): Response
     {
-        $format = Format::fromName((string) pathinfo($path, PATHINFO_EXTENSION));
-        $headers = [
-            ['Content-Type', $format === null ? 'application/octet-stream' : $format->mime()],
-            ['Cache-Control', 'no-store'],
-            ['X-Content-Type-Options', 'nosniff'],
-            ['X-Iar-Fallback', 'original'],
-        ];
-
-        if ($format === Format::Svg) {
-            $headers[] = ['Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox"];
-        }
-
-        $size = @filesize($path);
-        if ($size !== false) {
-            $headers[] = ['Content-Length', (string) $size];
-        }
-
-        return Response::file($path, $headers, $headOnly);
+        return OriginalResponse::make($path, $headOnly);
     }
 
     /**
@@ -182,8 +209,13 @@ final class Bootstrap
      * @param array<string,mixed> $get
      * @param array<string,mixed> $server
      */
-    public static function originalFile(array $get, array $server, ?string $baseDir = null): ?string
-    {
+    public static function originalFile(
+        array $get,
+        array $server,
+        ?string $baseDir = null,
+        ?PathRouter $router = null,
+        ?string $configFile = null,
+    ): ?string {
         $name = self::requestedName($get, $server);
         if ($name === null) {
             return null;
@@ -199,6 +231,11 @@ final class Bootstrap
         if ($base === false) {
             return null;
         }
+
+        // Псевдонимы действуют и на аварийном пути: иначе при сбое конфига
+        // файл, спрятанный за псевдонимом, найти было бы негде.
+        $router ??= self::emergencyRouter($configFile, $base . DIRECTORY_SEPARATOR);
+        $name = $router->route($name)->name;
 
         $path = realpath($base . '/' . ltrim($name, '/\\'));
         if ($path === false || !str_starts_with($path, $base . DIRECTORY_SEPARATOR) || !is_file($path)) {

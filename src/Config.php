@@ -50,6 +50,7 @@ final class Config
         public readonly int $maxInputMegapixels,
         public readonly int $maxInputBytes,
         public readonly bool $cacheKeyConfigHash,
+        public readonly string $aliasesFile,
     ) {
     }
 
@@ -149,6 +150,7 @@ final class Config
             maxInputMegapixels: self::positiveInt($raw, 'max_input_megapixels', 40),
             maxInputBytes: self::positiveInt($raw, 'max_input_bytes', 20000000),
             cacheKeyConfigHash: self::bool($raw, 'cache_key_config_hash', true),
+            aliasesFile: self::string($raw, 'aliases_file', __DIR__ . '/../aliases.json'),
         );
     }
 

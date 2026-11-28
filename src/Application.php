@@ -12,6 +12,7 @@ use App\Exception\ForbiddenException;
 use App\Exception\NotFoundException;
 use App\Exception\ProcessingException;
 use App\Exception\UnsupportedFormatException;
+use App\Http\OriginalResponse;
 use App\Http\Request;
 use App\Http\Response;
 use App\Infrastructure\CacheKey;
@@ -358,13 +359,24 @@ final class Application
         $parentDir = rtrim(dirname($request->scriptDir()), '/');
         $url = $parentDir . '/' . ltrim($request->name, '/\\');
 
+        // Псевдоним скрывает реальное положение файла: редиректить браузер
+        // некуда, отдаём оригинал прямо в теле ответа.
+        $inline = $request->route->hasAlias();
+
         $this->logger->log('fail', [
             'reason' => $e->reason(),
-            'status' => 302,
+            'status' => $inline ? 200 : 302,
             'url' => $request->requestUri,
-            'redirect' => $url,
+            'redirect' => $inline ? null : $url,
+            'alias' => $request->route->alias,
+            'preset' => $request->route->preset,
             'duration_ms' => $this->elapsedMs($started),
         ]);
+
+        if ($inline) {
+            return OriginalResponse::make($this->resolveSource($request->name), $request->isHead())
+                ->withHeader('X-Iar-Engine', 'intervention');
+        }
 
         return Response::redirect($url, 302, [
             ['Cache-Control', 'no-store'],
@@ -390,7 +402,9 @@ final class Application
         $this->logger->log($event, [
             'status' => $status,
             'url' => $request->requestUri,
-            'params' => $request->query,
+            'alias' => $request->route->alias,
+            'preset' => $request->route->preset,
+            'params' => $request->params,
             'orig_bytes' => $orig,
             'new_bytes' => $new,
             'saved_pct' => $orig > 0 ? round(($orig - $new) / $orig * 100, 2) : 0.0,

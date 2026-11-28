@@ -219,6 +219,7 @@ if (!function_exists('iar_legacy_run')) {
             'max_input_megapixels' => iar_legacy_int($raw, 'max_input_megapixels', 40, 1),
             'max_input_bytes' => iar_legacy_int($raw, 'max_input_bytes', 20000000, 1),
             'cache_dir' => iar_legacy_str($raw, 'cache_dir', $dir . '/cache'),
+            'aliases_file' => iar_legacy_str($raw, 'aliases_file', $dir . '/aliases.json'),
             'log_dir' => iar_legacy_str($raw, 'log_dir', $dir . '/log'),
             'logging' => iar_legacy_bool($raw, 'logging', false),
             'log_level' => $level,
@@ -237,6 +238,248 @@ if (!function_exists('iar_legacy_run')) {
             (int) $cfg['lossless'], (int) $cfg['png_indexed'], $cfg['png_indexed_threshold'],
             (int) $cfg['jpeg_progressive'], (int) $cfg['webp_strip_metadata'],
         ))), 0, 8);
+    }
+
+
+    // =====================================================================
+    // Маршруты из aliases.json: псевдонимы каталогов, пресеты и макросы
+    // последней папки. Правила те же, что в App\Http\PathRouter.
+    // =====================================================================
+
+    /** Загрузка JSON маршрутов; сломанный файл не роняет отдачу картинок. */
+    function iar_legacy_router($file, $base)
+    {
+        $empty = array('aliases' => array(), 'presets' => array(), 'macros' => false,
+            'width' => 'x-', 'height' => 'y-', 'base' => $base, 'error' => null);
+
+        if (!is_string($file) || !is_file($file)) {
+            return $empty;
+        }
+
+        $raw = @file_get_contents($file);
+        if ($raw === false) {
+            $empty['error'] = 'Aliases file is not readable.';
+
+            return $empty;
+        }
+
+        $json = json_decode($raw, true);
+        if (!is_array($json)) {
+            $empty['error'] = 'Aliases file must contain a JSON object.';
+
+            return $empty;
+        }
+
+        if (isset($json['enabled']) && $json['enabled'] !== true) {
+            return $empty;
+        }
+
+        $aliases = array();
+        foreach (iar_legacy_section($json, 'aliases') as $key => $value) {
+            $name = iar_legacy_norm_alias((string) $key);
+            $target = iar_legacy_norm_target($value);
+            if ($name !== null && $target !== null) {
+                $aliases[$name] = $target;
+            }
+        }
+        // Длинные префиксы важнее коротких: "a/b" побеждает "a".
+        uksort($aliases, 'iar_legacy_alias_order');
+
+        $presets = array();
+        foreach (iar_legacy_section($json, 'presets') as $key => $value) {
+            $name = (string) $key;
+            if ($name === '' || strpos($name, '_') === 0 || strpos($name, '/') !== false || !is_array($value)) {
+                continue;
+            }
+            $params = iar_legacy_norm_params($value);
+            if ($params !== array()) {
+                $presets[$name] = $params;
+            }
+        }
+
+        $macros = iar_legacy_section($json, 'macros');
+
+        return array(
+            'aliases' => $aliases,
+            'presets' => $presets,
+            'macros' => !isset($macros['enabled']) || $macros['enabled'] === true,
+            'width' => iar_legacy_prefix(isset($macros['width']) ? $macros['width'] : 'x-', 'x-'),
+            'height' => iar_legacy_prefix(isset($macros['height']) ? $macros['height'] : 'y-', 'y-'),
+            'base' => $base,
+            'error' => null,
+        );
+    }
+
+    function iar_legacy_alias_order($a, $b)
+    {
+        $diff = substr_count($b, '/') - substr_count($a, '/');
+
+        return $diff !== 0 ? $diff : strcmp($a, $b);
+    }
+
+    /**
+     * Разбор пути: сначала пресет/макро последней папки, затем псевдоним
+     * каталога. Реальный файл всегда важнее виртуального маршрута.
+     */
+    function iar_legacy_route($router, $relative)
+    {
+        $plain = array('name' => $relative, 'original' => $relative, 'params' => array(),
+            'alias' => null, 'preset' => null);
+
+        // Разделители нормализуем до срезания крайних слэшей.
+        $path = ltrim(str_replace('\\', '/', $relative), '/');
+        $empty = $router['aliases'] === array() && $router['presets'] === array() && !$router['macros'];
+        // Файл в корне не может содержать папку-пресет или префикс псевдонима.
+        if ($empty || strpos($path, '/') === false || strpos($path, "\0") !== false) {
+            return $plain;
+        }
+
+        $segments = explode('/', $path);
+        $params = array();
+        $preset = null;
+
+        if (count($segments) >= 2) {
+            $folder = $segments[count($segments) - 2];
+            $found = iar_legacy_folder_params($router, $folder);
+            if ($found !== null) {
+                $params = $found[0];
+                $preset = $found[1];
+                array_splice($segments, count($segments) - 2, 1);
+            }
+        }
+
+        $rest = implode('/', $segments);
+        $alias = null;
+        $name = $rest;
+        foreach ($router['aliases'] as $key => $target) {
+            if (strpos($rest, $key . '/') === 0) {
+                $name = $target . substr($rest, strlen($key) + 1);
+                $alias = $key;
+                break;
+            }
+        }
+
+        if ($params === array() && $alias === null) {
+            return $plain;
+        }
+
+        // Обратная совместимость: буквальный путь выигрывает у маршрута.
+        if ($router['base'] !== null && is_file($router['base'] . $path)) {
+            return $plain;
+        }
+
+        return array('name' => $name, 'original' => $relative, 'params' => $params,
+            'alias' => $alias, 'preset' => $preset);
+    }
+
+    /** Пресет важнее маски; макрос даёт ровно один параметр. */
+    function iar_legacy_folder_params($router, $folder)
+    {
+        if (isset($router['presets'][$folder])) {
+            return array($router['presets'][$folder], $folder);
+        }
+
+        if (!$router['macros']) {
+            return null;
+        }
+
+        foreach (array(array($router['width'], 'w'), array($router['height'], 'h')) as $pair) {
+            list($prefix, $key) = $pair;
+            if (strpos($folder, $prefix) !== 0) {
+                continue;
+            }
+            $number = substr($folder, strlen($prefix));
+            if ($number === '' || strlen($number) > 6 || !ctype_digit($number) || (int) $number < 1) {
+                continue;
+            }
+
+            return array(array($key => $number), $folder);
+        }
+
+        return null;
+    }
+
+    function iar_legacy_section($json, $key)
+    {
+        return isset($json[$key]) && is_array($json[$key]) ? $json[$key] : array();
+    }
+
+    function iar_legacy_safe_path($path)
+    {
+        if (strpos($path, "\0") !== false || strpos($path, '://') !== false
+            || preg_match('/^[A-Za-z]:/', $path) === 1) {
+            return false;
+        }
+        foreach (explode('/', $path) as $segment) {
+            if ($segment === '..' || $segment === '.') {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    function iar_legacy_norm_alias($key)
+    {
+        $key = trim(str_replace('\\', '/', $key), '/');
+        if ($key === '' || strpos($key, '_') === 0 || !iar_legacy_safe_path($key)) {
+            return null;
+        }
+
+        return $key;
+    }
+
+    function iar_legacy_norm_target($value)
+    {
+        if (!is_string($value)) {
+            return null;
+        }
+        $target = trim(str_replace('\\', '/', $value), '/');
+        if ($target === '') {
+            return '';
+        }
+        if (!iar_legacy_safe_path($target)) {
+            return null;
+        }
+
+        return $target . '/';
+    }
+
+    /** Только белый список параметров URL API и только скаляры. */
+    function iar_legacy_norm_params($value)
+    {
+        $allowed = array('w', 'h', 'm', 'g', 'fm', 'ct', 'cr', 'cb', 'cl');
+        $params = array();
+        foreach ($value as $key => $item) {
+            if (!in_array((string) $key, $allowed, true) || !is_scalar($item)) {
+                continue;
+            }
+            $params[(string) $key] = (string) $item;
+        }
+
+        return $params;
+    }
+
+    function iar_legacy_prefix($value, $default)
+    {
+        if (!is_string($value) || preg_match('/^[A-Za-z0-9_-]{1,16}$/', $value) !== 1) {
+            return $default;
+        }
+
+        return $value;
+    }
+
+    /** Параметры пути — значения по умолчанию: явный ?w= всегда важнее. */
+    function iar_legacy_merge_params($get, $path)
+    {
+        foreach ($path as $key => $value) {
+            $current = isset($get[$key]) ? $get[$key] : null;
+            if (!array_key_exists($key, $get) || (is_string($current) && trim($current) === '')) {
+                $get[$key] = $value;
+            }
+        }
+
+        return $get;
     }
 
     // =====================================================================
@@ -546,7 +789,20 @@ if (!function_exists('iar_legacy_run')) {
             ));
         }
 
-        $source = iar_legacy_source($cfg, $name);
+        $router = iar_legacy_router($cfg['aliases_file'], $cfg['base']);
+        if ($router['error'] !== null) {
+            iar_legacy_log($cfg, 'fail', array(
+                'reason' => $router['error'],
+                'status' => 0,
+                'url' => iar_legacy_str($server, 'REQUEST_URI', ''),
+                'stage' => 'aliases',
+            ));
+        }
+
+        $route = iar_legacy_route($router, $name);
+        $get = iar_legacy_merge_params($get, $route['params']);
+
+        $source = iar_legacy_source($cfg, $route['name']);
         $sourceExt = strtolower((string) pathinfo($source, PATHINFO_EXTENSION));
         $params = iar_legacy_params($get, $cfg);
 
@@ -573,7 +829,7 @@ if (!function_exists('iar_legacy_run')) {
                     return iar_legacy_error_response($e, $head);
                 }
 
-                return iar_legacy_original_redirect($get, $server, $cfg, $head, $e->getMessage(), $started);
+                return iar_legacy_original_redirect($get, $server, $cfg, $head, $e->getMessage(), $started, $route);
             }
         }
 
@@ -590,6 +846,8 @@ if (!function_exists('iar_legacy_run')) {
                 'saved_pct' => $origBytes > 0 ? round(($origBytes - $newBytes) / $origBytes * 100, 2) : 0.0,
                 'duration_ms' => round((microtime(true) - $started) * 1000, 2),
                 'engine' => 'legacy',
+                'alias' => $route['alias'],
+                'preset' => $route['preset'],
             );
             if ($cfg['log_level'] === 'debug') {
                 $context['params'] = $get;
@@ -1193,18 +1451,39 @@ if (!function_exists('iar_legacy_run')) {
     }
 
     /** Сбой обработки → редирект на оригинал (картинка не исчезает). */
-    function iar_legacy_original_redirect($get, $server, $cfg, $head, $reason, $started)
+    function iar_legacy_original_redirect($get, $server, $cfg, $head, $reason, $started, $route = null)
     {
         $scriptDir = rtrim(str_replace('\\', '/', dirname(iar_legacy_str($server, 'SCRIPT_NAME', '/index.php'))), '/');
         $parentDir = rtrim(str_replace('\\', '/', dirname($scriptDir)), '/');
-        $name = iar_legacy_name($get, $server);
+        $name = $route === null ? iar_legacy_name($get, $server) : $route['name'];
         $url = $parentDir . '/' . ltrim((string) $name, '/\\');
+        $alias = $route === null ? null : $route['alias'];
+
+        // Псевдоним скрывает реальный путь: редиректить некуда, отдаём тело.
+        if ($alias !== null) {
+            iar_legacy_log($cfg, 'fail', array(
+                'reason' => $reason,
+                'status' => 200,
+                'url' => iar_legacy_str($server, 'REQUEST_URI', ''),
+                'alias' => $alias,
+                'preset' => $route['preset'],
+                'duration_ms' => round((microtime(true) - $started) * 1000, 2),
+                'engine' => 'legacy',
+            ));
+
+            $original = iar_legacy_source($cfg, $route['name']);
+            $response = iar_legacy_original_body($original, $head);
+            $response['headers'][] = array('X-Iar-Engine', 'legacy');
+
+            return $response;
+        }
 
         iar_legacy_log($cfg, 'fail', array(
             'reason' => $reason,
             'status' => 302,
             'url' => iar_legacy_str($server, 'REQUEST_URI', ''),
             'redirect' => $url,
+            'preset' => $route === null ? null : $route['preset'],
             'duration_ms' => round((microtime(true) - $started) * 1000, 2),
             'engine' => 'legacy',
         ));
@@ -1241,7 +1520,14 @@ if (!function_exists('iar_legacy_run')) {
             $root = $root === '' ? dirname(dirname(__FILE__)) : $root;
             $base = realpath($root);
             if ($base !== false) {
-                $candidate = realpath($base . '/' . ltrim($name, '/\\'));
+                // Путь к маршрутам берём из конфига (он терпим к ошибкам),
+                // иначе — файл рядом с index.php.
+                $aliasesFile = isset($cfg['aliases_file']) && is_string($cfg['aliases_file']) && $cfg['aliases_file'] !== ''
+                    ? $cfg['aliases_file']
+                    : dirname(__FILE__) . '/aliases.json';
+                $router = iar_legacy_router($aliasesFile, $base . DIRECTORY_SEPARATOR);
+                $routed = iar_legacy_route($router, $name);
+                $candidate = realpath($base . '/' . ltrim($routed['name'], '/\\'));
                 $allowed = array('jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'svg');
                 if ($candidate !== false && strpos($candidate, $base . DIRECTORY_SEPARATOR) === 0
                     && is_file($candidate)
@@ -1277,12 +1563,20 @@ if (!function_exists('iar_legacy_run')) {
             );
         }
 
+        $response = iar_legacy_original_body($path, $head);
+        $response['headers'][] = array('X-Iar-Engine', 'legacy');
+
+        return $response;
+    }
+
+    /** Тело оригинала с заголовками безопасности — общий код для обоих путей. */
+    function iar_legacy_original_body($path, $head)
+    {
         $ext = strtolower((string) pathinfo($path, PATHINFO_EXTENSION));
         $headers = array(
             array('Content-Type', iar_legacy_mime($ext)),
             array('Cache-Control', 'no-store'),
             array('X-Content-Type-Options', 'nosniff'),
-            array('X-Iar-Engine', 'legacy'),
             array('X-Iar-Fallback', 'original'),
         );
         if ($ext === 'svg') {

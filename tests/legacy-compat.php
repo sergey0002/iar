@@ -125,6 +125,8 @@ $writeConfig = function ($overrides = array()) use ($site, $configFile) {
         'cache_dir' => $site . '/cache',
         'log_dir' => $site . '/log',
         'redirect_to_cache' => false,
+        // Совместимость проверяем без влияния боевого aliases.json.
+        'aliases_file' => $site . '/aliases.json',
     ), $overrides);
     file_put_contents($configFile, '<?php return ' . var_export($raw, true) . ';');
 
@@ -292,7 +294,65 @@ iar_legacy_clean_old($dir, 'photo__', '__' . md5('photo.jpg') . '_', 'keep.jpg',
 iar_ok(count(glob($dir . '/*')) < $before, 'точечная очистка удалила варианты оригинала');
 iar_ok(is_file($dir . '/other__10x0__' . md5('other.jpg') . '_1.jpg'), 'чужие файлы не тронуты');
 
-// 15. Сквозной вызов через index.php (выбор движка по версии PHP).
+// 15. Маршруты из aliases.json: псевдонимы, пресеты, макросы последней папки.
+$aliasesFile = $site . '/aliases.json';
+file_put_contents($aliasesFile, json_encode(array(
+    'aliases' => array('z' => '/z/s/d/f/', 'img' => 'nested', 'c' => ''),
+    'presets' => array('1000' => array('w' => 1000), 'thumb' => array('w' => 60, 'h' => 40, 'm' => 'cover')),
+    'macros' => array('enabled' => true, 'width' => 'x-', 'height' => 'y-'),
+)));
+$cfg = $writeConfig();
+$router = iar_legacy_router($aliasesFile, $site . '/');
+iar_same(null, $router['error'], 'aliases.json загружен без ошибок');
+
+$routed = iar_legacy_route($router, 'z/file.png');
+iar_same('z/s/d/f/file.png', $routed['name'], 'псевдоним раскрывает реальный каталог');
+iar_same('z', $routed['alias'], 'имя псевдонима сохранено');
+iar_same('z/file.png', $routed['original'], 'исходный путь сохранён');
+
+iar_same(array('w' => '2000'), iar_legacy_route($router, 'x-2000/photo.jpg')['params'], 'макро x- задаёт только ширину');
+iar_same(array('h' => '1000'), iar_legacy_route($router, 'y-1000/photo.jpg')['params'], 'макро y- задаёт только высоту');
+$preset = iar_legacy_route($router, '1000/photo.jpg');
+iar_same('photo.jpg', $preset['name'], 'папка-пресет вырезана из пути');
+iar_same(array('w' => '1000'), $preset['params'], 'пресет 1000 = ширина 1000');
+iar_same('1000/nested/photo.jpg', iar_legacy_route($router, '1000/nested/photo.jpg')['name'], 'только последняя папка — пресет');
+iar_same(array('w' => '60', 'h' => '40', 'm' => 'cover'), iar_legacy_route($router, 'img/thumb/photo.jpg')['params'], 'псевдоним и пресет вместе');
+iar_same('nested/photo.jpg', iar_legacy_route($router, 'img/thumb/photo.jpg')['name'], 'псевдоним применён после пресета');
+iar_same(array('w' => '30'), iar_legacy_merge_params(array('w' => '30'), array('w' => '60')), 'явный query важнее пресета');
+iar_same(array('w' => '60'), iar_legacy_merge_params(array('w' => ''), array('w' => '60')), 'пустой query считается отсутствующим');
+
+$viaPreset = $plan(array('name' => 'thumb/photo.jpg'), $cfg);
+$viaQuery = $plan(array('name' => 'photo.jpg', 'w' => '60', 'h' => '40', 'm' => 'cover'), $cfg);
+iar_same('miss', iar_header($viaPreset, 'X-Iar-Cache'), 'пресет генерирует вариант');
+iar_same('hit', iar_header($viaQuery, 'X-Iar-Cache'), 'тот же вариант доступен через query');
+iar_same($viaPreset['file'], $viaQuery['file'], 'кеш-ключ пресета и query совпадает');
+iar_same(array(60, 40), iar_size(iar_body($viaPreset)), 'пресет задаёт точный размер cover');
+
+$macro = $plan(array('name' => 'img/x-60/photo.jpg'), $cfg);
+iar_same(array(60, 40), iar_size(iar_body($macro)), 'псевдоним + макро дают уменьшенную копию');
+
+mkdir($site . '/1000', 0777, true);
+copy($site . '/photo.jpg', $site . '/1000/photo.jpg');
+iar_same('1000/photo.jpg', iar_legacy_route($router, '1000/photo.jpg')['name'], 'реальный каталог важнее пресета');
+
+$broken = $plan(array('name' => 'c/corrupt.jpg', 'w' => '40'), $cfg);
+iar_same(200, $broken['status'], 'при сбое за псевдонимом отдаётся оригинал');
+iar_same('original', iar_header($broken, 'X-Iar-Fallback'), 'маркер fallback за псевдонимом');
+iar_same(null, iar_header($broken, 'Location'), 'псевдоним не редиректит на реальный путь');
+
+$emergency = iar_legacy_fallback(array('name' => 'img/photo.jpg'), $server, $cfg, false, 'сбой', false);
+iar_same(200, $emergency['status'], 'аварийный путь понимает псевдонимы');
+iar_same(file_get_contents($site . '/nested/photo.jpg'), iar_body($emergency), 'аварийный путь отдаёт скрытый оригинал');
+
+file_put_contents($aliasesFile, '{broken');
+$cfg = $writeConfig();
+iar_same('Aliases file must contain a JSON object.', iar_legacy_router($aliasesFile, $site . '/')['error'], 'сломанный JSON объяснён');
+$survived = $plan(array('name' => 'photo.jpg', 'w' => '25'), $cfg);
+iar_same(200, $survived['status'], 'сломанный aliases.json не ломает картинки');
+unlink($aliasesFile);
+$cfg = $writeConfig();
+
+// 16. Сквозной вызов через index.php (выбор движка по версии PHP).
 $_GET = array('name' => 'photo.jpg', 'w' => '55');
 $_SERVER = array_merge($server, array('REQUEST_URI' => '/iar/photo.jpg?w=55'));
 define('IAR_CONFIG', $configFile);

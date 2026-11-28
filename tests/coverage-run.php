@@ -24,5 +24,6 @@ require_once $covDir . '/collector.php';
 IarCoverage::enable($covDir . '/hits');
 
 define('IAR_AUTOLOAD', $covDir . '/autoload.php');
+define('IAR_LEGACY', $covDir . '/legacy.php');
 
 require $root . '/tests/run.php';

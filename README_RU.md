@@ -305,6 +305,7 @@ return [
 | `cache_key_config_hash` | bool | Включать отпечаток настроек качества в кеш-ключ: смена качества сразу даёт новый вариант. |
 | `logging` | bool | Отладочный лог. **По умолчанию `false`.** |
 | `log_dir` | path | Директория для лог-файлов (один файл в день). |
+| `log_level` | `error` / `info` / `debug` | `error` (по умолчанию) — только сбои с причиной; `info` — плюс hit/miss; `debug` — плюс параметры запроса. На `error` метрики не собираются, горячий путь не делает лишних обращений к диску. |
 
 ### Сравнение режимов кеша
 
@@ -388,6 +389,18 @@ php tools/coverage-portable.php build
 php tests/coverage-run.php
 php tools/integration.php run
 php tools/coverage-portable.php report 100
+
+# Совместимость с PHP 7.0 … 8.4 (без composer, без PHPUnit)
+php tests/legacy-compat.php
+
+# Замер обращений к диску на cache hit
+php tools/io-probe.php build
+php tools/integration.php setup 0 /tmp/iar-probe
+php tools/integration.php payload 0 0 /tmp/iar-probe "" probe > /tmp/p.json
+php tests/Integration/step.php /tmp/p.json   # MISS
+php tools/io-probe.php reset
+php tests/Integration/step.php /tmp/p.json   # HIT
+php tools/io-probe.php report
 ```
 
 С Composer доступны привычные команды:
@@ -442,7 +455,22 @@ location ~ ^/iar/(config\.php|composer\.|src/|tests/|tools/|log/|vendor/|\.) {
 }
 ```
 
-### Сброс кеша
+### Очистка кеша — точечная, без удаления всей папки
+
+```bash
+php tools/cache.php stats                      # сколько файлов, вес, сколько оригиналов
+php tools/cache.php clean --source=photo.jpg   # все варианты одного оригинала
+php tools/cache.php clean --orphans            # варианты удалённых оригиналов
+php tools/cache.php clean --older-than=30d     # давно не создававшиеся варианты
+php tools/cache.php clean --max-size=500M      # самые старые, пока вес больше лимита
+php tools/cache.php wipe                       # всё содержимое кеша
+```
+
+Любая команда принимает `--dry-run`. Инструмент работает на PHP 7.0+ без
+зависимостей и не читает содержимое файлов: имя варианта содержит хеш
+относительного пути оригинала, поэтому поиск точечный.
+
+Полный сброс тоже допустим:
 
 ```bash
 rm -rf /путь/к/сайту/iar/cache/*
@@ -454,9 +482,11 @@ rm -rf /путь/к/сайту/iar/cache/*
 
 | Симптом | Причина | Решение |
 | :--- | :--- | :--- |
-| `500` и текст про `composer install` | не установлены зависимости | `composer install --no-dev -o` внутри папки |
+| `X-Iar-Engine: legacy` | PHP < 8.1 или нет `vendor/` | это нормально: работает движок без зависимостей; для полного — PHP 8.1+ и `composer install --no-dev -o` |
+| `500 IAR installation is incomplete` | в папке нет ни `vendor/`, ни `legacy.php` | распакуйте папку IAR целиком |
 | `500 Configuration error.` | неверный `images_base_dir` или тип значения | проверьте `config.php`, ошибка намеренно явная |
-| `302` на оригинал вместо миниатюры | GD не смог обработать файл | включите `logging => true`, посмотрите `reason` в `log/` |
+| `302` на оригинал вместо миниатюры (`X-Iar-Fallback: original`) | GD не смог обработать файл или конвертация потеряла бы анимацию | включите `logging => true`, посмотрите `reason` в `log/` |
+| `X-Iar-Cache: miss` на каждом запросе | `disable_cache => true` или оригинал постоянно меняется | проверьте конфиг и mtime оригинала |
 | `413` | оригинал больше `max_input_megapixels` / `max_input_bytes` | уменьшите оригинал или поднимите лимит |
 | Фото повёрнуто неверно | нет `ext-exif` | установите `php-exif` |
 | SVG не растеризуется | нет `ext-imagick` | установите `php-imagick` или отдавайте SVG как есть |
@@ -488,12 +518,30 @@ URL API не изменился: существующие ссылки прод�
 
 | Компонент | Минимум | Рекомендуется |
 | :--- | :---: | :---: |
-| PHP | ≥ 8.1 | 8.2+ |
+| PHP | **≥ 7.0** (движок `legacy.php`) | 8.1+ (полный движок `src/`) |
 | PHP GD extension | ✅ Обязательно | + WebP + AVIF support |
 | Apache `mod_rewrite` | — | ✅ Для красивых URL |
 | `php-exif` | — | ✅ Корректная ориентация JPEG |
 | `php-imagick` | — | ✅ Для SVG → растр |
-| Composer | — | ✅ Только для установки зависимостей |
+| Composer | **не нужен** | ✅ Для полного движка (Intervention Image) |
+
+### Два движка — один URL API и один кеш
+
+| | `legacy.php` | `src/` (Intervention) |
+| :--- | :--- | :--- |
+| Когда включается | PHP 7.0–8.0 **или** нет `vendor/` | PHP ≥ 8.1 и установлен Composer |
+| Зависимости | нет (только GD) | `intervention/image` |
+| Кеш | **тот же каталог и те же имена файлов** | **тот же каталог и те же имена файлов** |
+| URL API, заголовки, ETag, 304 | идентичны | идентичны |
+| Анимированный GIF | отдаётся оригиналом | ресайз с сохранением кадров; смена формата → оригинал |
+| Анимированный WebP | отдаётся оригиналом | отдаётся оригиналом |
+| SVG → растр | только с `ext-imagick` | только с `ext-imagick` |
+| AVIF | если GD умеет | если GD умеет |
+
+Переключение автоматическое и незаметно для браузера: имена кеш-файлов
+совпадают побайтово (проверяется тестами `LegacyTest`), поэтому переезд
+с PHP 7 на PHP 8 не требует ни сброса кеша, ни изменения ссылок.
+Движок, ответивший на запрос, виден в заголовке `X-Iar-Engine`.
 
 ---
 
@@ -504,6 +552,7 @@ URL API не изменился: существующие ссылки прод�
 - [Аудит проекта](docs/audit.md)
 - [План исправлений](docs/remediation-plan.md)
 - [Отчёт о внедрении и тестах](docs/implementation-report.md)
+- [Аудит политик продукта](docs/policies-audit.md)
 
 ---
 

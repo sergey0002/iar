@@ -11,7 +11,7 @@ declare(strict_types=1);
  *   2) роутер встроенного сервера: php -S ... tests/Integration/step.php,
  *      задание берётся из окружения IAR_STEP_PAYLOAD.
  *
- * Формат задания: {entry, get, server, config, coverage, no_autoload}.
+ * Формат задания: {entry, get, server, config, coverage, no_autoload, probe}.
  */
 
 $payloadFile = $argv[1] ?? (string) getenv('IAR_STEP_PAYLOAD');
@@ -33,10 +33,26 @@ if (PHP_SAPI === 'cli-server') {
     $_SERVER['SCRIPT_NAME'] = '/iar/index.php';
 }
 
+if (($payload['probe'] ?? null) !== null) {
+    $probeDir = (string) $payload['probe'];
+    require_once $probeDir . '/collector.php';
+    IarProbe::enable($probeDir . '/hits', (bool) ($payload['probe_trace'] ?? false));
+    if (!($payload['no_autoload'] ?? false)) {
+        define('IAR_AUTOLOAD', $probeDir . '/autoload.php');
+    }
+    if (!($payload['no_legacy'] ?? false)) {
+        define('IAR_LEGACY', $probeDir . '/legacy.php');
+    }
+}
+
 if (($payload['coverage'] ?? null) !== null) {
     $covDir = (string) $payload['coverage'];
     require_once $covDir . '/collector.php';
     IarCoverage::enable($covDir . '/hits');
+
+    if (!($payload['no_legacy'] ?? false)) {
+        define('IAR_LEGACY', $covDir . '/legacy.php');
+    }
 
     if (!($payload['no_autoload'] ?? false)) {
         define('IAR_AUTOLOAD', $covDir . '/autoload.php');

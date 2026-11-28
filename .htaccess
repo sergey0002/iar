@@ -75,8 +75,19 @@ Options -Indexes
 # Заголовки безопасности при прямой отдаче Apache.
 # В PHP-пути те же заголовки ставит App\Application.
 # ============================================================
+# Файлы кеша версионированы именем: при изменении оригинала меняется
+# mtime в имени, значит меняется и URL. Поэтому их можно кешировать
+# в браузере «навсегда» — браузер всё равно получит новый URL, потому
+# что сам редирект (/iar/photo.jpg?w=...) отдаётся с no-cache.
+# ВАЖНО: правило безопасно при cache_key_config_hash => true (дефолт).
+SetEnvIfNoCase Request_URI "(^|/)cache/" IAR_CACHE_FILE=1
+
 <IfModule mod_headers.c>
     Header always set X-Content-Type-Options "nosniff"
+
+    # Мгновенные повторные просмотры: файл берётся из кеша браузера,
+    # запрос к серверу не уходит вовсе.
+    Header always set Cache-Control "public, max-age=31536000, immutable" env=IAR_CACHE_FILE
 
     # SVG может содержать скрипты — запрещаем выполнение (аудит S-01)
     <FilesMatch "\.svg$">

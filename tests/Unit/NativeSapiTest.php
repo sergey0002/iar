@@ -73,4 +73,21 @@ final class NativeSapiTest extends TestCase
     {
         self::assertIsBool((new NativeSapi())->headersSent());
     }
+
+    /** После отправки тела заголовки менять нельзя — вызов игнорируется. */
+    public function testHeaderIsIgnoredAfterOutput(): void
+    {
+        if (!headers_sent()) {
+            echo str_repeat(' ', 8192);
+            flush();
+        }
+        if (!headers_sent()) {
+            self::markTestSkipped('SAPI does not track sent headers');
+        }
+
+        $sapi = new NativeSapi();
+        $sapi->header('X-Iar-After-Output: 1');
+
+        self::assertTrue($sapi->headersSent());
+    }
 }

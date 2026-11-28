@@ -25,6 +25,11 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\SkippedTestError;
 use PHPUnit\Framework\TestCase;
 
+// Ограничение набора файлов: IAR_TEST_FILES="LegacyTest.php" — грузить
+// только перечисленные файлы (экономит память в ограниченных окружениях).
+$fileFilter = defined('IAR_TEST_FILES') ? IAR_TEST_FILES : (string) getenv('IAR_TEST_FILES');
+$onlyFiles = $fileFilter === '' ? [] : array_map('trim', explode(',', $fileFilter));
+
 $files = [];
 foreach (['Unit', 'Integration'] as $suite) {
     $dir = __DIR__ . '/' . $suite;
@@ -32,12 +37,21 @@ foreach (['Unit', 'Integration'] as $suite) {
         continue;
     }
     foreach (scandir($dir) ?: [] as $entry) {
-        if (str_ends_with($entry, 'Test.php')) {
+        if (str_ends_with($entry, 'Test.php') && ($onlyFiles === [] || in_array($entry, $onlyFiles, true))) {
             $files[] = $dir . '/' . $entry;
         }
     }
 }
 sort($files);
+
+// Фильтр классов: IAR_TEST_FILTER="LegacyTest,ConfigTest" — позволяет
+// запускать набор частями (например, в WASM-окружении с ограниченной памятью).
+$filter = defined('IAR_TEST_FILTER') ? IAR_TEST_FILTER : (string) getenv('IAR_TEST_FILTER');
+$only = $filter === '' ? [] : array_map('trim', explode(',', $filter));
+
+// Фильтр методов: позволяет дробить большие наборы (WASM-окружение).
+$methodFilter = defined('IAR_TEST_METHOD_FILTER') ? IAR_TEST_METHOD_FILTER : (string) getenv('IAR_TEST_METHOD_FILTER');
+$onlyMethods = $methodFilter === '' ? [] : array_map('trim', explode(',', $methodFilter));
 
 $passed = 0;
 $failed = 0;
@@ -59,9 +73,15 @@ foreach (get_declared_classes() as $class) {
     if ($reflection->isAbstract()) {
         continue;
     }
+    if ($only !== [] && !in_array($reflection->getShortName(), $only, true)) {
+        continue;
+    }
 
     foreach ($reflection->getMethods(ReflectionMethod::IS_PUBLIC) as $method) {
         if (!str_starts_with($method->getName(), 'test')) {
+            continue;
+        }
+        if ($onlyMethods !== [] && !in_array($method->getName(), $onlyMethods, true)) {
             continue;
         }
 

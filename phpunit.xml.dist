@@ -24,6 +24,7 @@
         <include>
             <directory suffix=".php">src</directory>
             <file>index.php</file>
+            <file>legacy.php</file>
         </include>
     </source>
 

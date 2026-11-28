@@ -72,8 +72,13 @@ final class Application
                 $hit = !$this->generate($source, $cachePath, $key, $params, $target, $sourceFormat, $mtime);
             }
 
-            $response = $this->buildResponse($request, $cachePath, $target, $sourceFormat);
-            $this->logRequest($request, $hit ? 'hit' : 'miss', $response->status, $source, $cachePath, $started);
+            $response = $this->buildResponse($request, $cachePath, $key, $target, $sourceFormat, $hit);
+
+            // Горячий путь: метрики (filesize оригинала и варианта) собираются
+            // только если их действительно кто-то запишет.
+            if ($this->logger->logsRequests()) {
+                $this->logRequest($request, $hit ? 'hit' : 'miss', $response->status, $source, $cachePath, $started);
+            }
 
             return $response;
         } catch (ProcessingException $e) {
@@ -148,6 +153,7 @@ final class Application
                 CacheKey::filenamePrefix($source),
                 CacheKey::hashMarker($source, $this->config->imagesBaseDir),
                 basename($cachePath),
+                $mtime . $this->config->qualityFingerprint() . '.',
             );
         }
 
@@ -160,9 +166,17 @@ final class Application
             }
 
             // No-op: без операций и без смены формата не перекодируем (B-14).
-            $data = (!$params->hasOperations() && $target === $sourceFormat)
-                ? $this->readSource($source)
-                : $this->resizer->render($source, $params, $target);
+            if (!$params->hasOperations() && $target === $sourceFormat) {
+                $data = $this->readSource($source);
+            } else {
+                $data = $this->resizer->render($source, $params, $target);
+
+                // Пустой результат в кеш не публикуем: лучше отдать оригинал,
+                // чем «сломанную картинку» (политика надёжности).
+                if ($data === '') {
+                    throw new ProcessingException('Renderer produced an empty image.');
+                }
+            }
 
             $this->cache->put($cachePath, $data);
 
@@ -185,11 +199,14 @@ final class Application
     private function buildResponse(
         Request $request,
         string $cachePath,
+        string $key,
         Format $target,
         Format $sourceFormat,
+        bool $hit,
     ): Response {
         $headOnly = $request->isHead();
         $headers = $this->commonHeaders($target, $request);
+        $headers[] = ['X-Iar-Cache', $hit ? 'hit' : 'miss'];
 
         if ($this->config->disableCache) {
             $headers[] = ['Cache-Control', 'no-cache, no-store, must-revalidate'];
@@ -201,7 +218,10 @@ final class Application
             return Response::file($cachePath, $headers, $headOnly);
         }
 
-        $etag = $this->etag($cachePath);
+        // ETag выводится из кеш-ключа, а не из stat() файла: ключ уже
+        // содержит mtime оригинала, размеры и отпечаток качества, поэтому
+        // он меняется ровно тогда, когда меняется содержимое варианта.
+        $etag = '"' . md5($key . '.' . $target->cacheExtension()) . '"';
         $cacheControl = $this->config->staticMode
             ? 'public, max-age=' . self::IMMUTABLE_MAX_AGE . ', immutable'
             : 'no-cache';
@@ -245,7 +265,10 @@ final class Application
     /** @return list<array{0:string,1:string}> */
     private function commonHeaders(Format $target, Request $request): array
     {
-        $headers = [['X-Content-Type-Options', 'nosniff']];
+        $headers = [
+            ['X-Content-Type-Options', 'nosniff'],
+            ['X-Iar-Engine', 'intervention'],
+        ];
 
         if ($request->multipleCropParams) {
             // Несколько кроп-параметров: применяется первый по приоритету ct→cr→cb→cl.
@@ -300,15 +323,6 @@ final class Application
         return $value !== false && $value !== '' && $value !== '0';
     }
 
-    private function etag(string $path): string
-    {
-        $mtime = @filemtime($path);
-        $size = @filesize($path);
-
-        // Разделитель исключает коллизию склейки (аудит B-19/H-06).
-        return '"' . md5(($mtime === false ? 0 : $mtime) . ':' . ($size === false ? 0 : $size)) . '"';
-    }
-
     /**
      * URL кеш-файла вычисляется из реального cache_dir относительно
      * DOCUMENT_ROOT (аудит B-08). Вне webroot — редирект невозможен.
@@ -355,6 +369,8 @@ final class Application
         return Response::redirect($url, 302, [
             ['Cache-Control', 'no-store'],
             ['X-Content-Type-Options', 'nosniff'],
+            ['X-Iar-Engine', 'intervention'],
+            ['X-Iar-Fallback', 'original'],
         ], $request->isHead());
     }
 

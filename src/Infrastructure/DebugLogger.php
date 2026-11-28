@@ -17,15 +17,43 @@ final class DebugLogger implements LoggerInterface
 {
     private const SENSITIVE = '/(token|pass|secret|auth|api_?key|session)/i';
 
-    public function __construct(private readonly string $dir)
+    public const LEVEL_ERROR = 'error';
+
+    public const LEVEL_INFO = 'info';
+
+    public const LEVEL_DEBUG = 'debug';
+
+    public function __construct(
+        private readonly string $dir,
+        private readonly string $level = self::LEVEL_ERROR,
+    ) {
+    }
+
+    /**
+     * Уровень error — только сбои (этого достаточно для отладки:
+     * причина, URL, куда редиректнули). Информация о каждом hit/miss
+     * не собирается и не пишется, поэтому горячий путь не замедляется.
+     */
+    public function logsRequests(): bool
     {
+        return $this->level !== self::LEVEL_ERROR;
     }
 
     public function log(string $event, array $context): void
     {
+        if ($event !== 'fail' && !$this->logsRequests()) {
+            return;
+        }
+
+        if ($this->level !== self::LEVEL_DEBUG) {
+            // Параметры запроса — только на уровне debug (приватность).
+            unset($context['params']);
+        }
+
         $record = [
             'ts' => date('Y-m-d H:i:s'),
             'event' => self::clean($event),
+            'level' => $this->level,
         ] + $this->sanitize($context);
 
         $json = json_encode($record, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);

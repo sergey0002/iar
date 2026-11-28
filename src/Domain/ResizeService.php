@@ -53,8 +53,26 @@ final class ResizeService implements ResizerInterface
 
         $this->guardInputSize($sourcePath);
 
+        // GD-драйвер читает у WebP только первый кадр, поэтому анимированный
+        // WebP обрабатывать нельзя — отдаём оригинал (политика анимации).
+        if ($sourceFormat === Format::Webp && self::isAnimatedWebp($sourcePath)) {
+            throw new ProcessingException('Animated webp cannot be processed without losing frames.');
+        }
+
         try {
             $image = $this->manager->read($sourcePath);
+
+            // Политика анимации: GIF-кадры Intervention сохраняет (декодер
+            // анимации + покадровый энкодер), но при смене формата они теряются.
+            // Такую конвертацию не делаем — Application отдаст оригинал.
+            if ($target !== $sourceFormat && $image->count() > 1) {
+                throw new ProcessingException(sprintf(
+                    'Animated %s cannot be converted to %s without losing frames.',
+                    $sourceFormat->value,
+                    $target->value,
+                ));
+            }
+
             $this->applyEdgeCrop($image, $params->crop);
             $this->applyResizePolicy($image, $params);
 
@@ -90,6 +108,17 @@ final class ResizeService implements ResizerInterface
         if ($pixels > $this->config->maxInputMegapixels * 1000000) {
             throw new InputTooLargeException('Source image exceeds max_input_megapixels.');
         }
+    }
+
+    /**
+     * Признак анимации WebP: чанк ANMF в заголовке контейнера RIFF.
+     * Читается только начало файла и только на генерации (не на cache hit).
+     */
+    private static function isAnimatedWebp(string $path): bool
+    {
+        $header = (string) @file_get_contents($path, false, null, 0, 4096);
+
+        return str_contains($header, 'ANMF');
     }
 
     /**

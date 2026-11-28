@@ -10,4 +10,9 @@ final class NullLogger implements LoggerInterface
     {
         // Логирование выключено — намеренно ничего не делаем.
     }
+
+    public function logsRequests(): bool
+    {
+        return false;
+    }
 }

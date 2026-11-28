@@ -11,6 +11,15 @@ final class SpyLogger implements LoggerInterface
     /** @var list<array{event:string,context:array<string,mixed>}> */
     public array $records = [];
 
+    public function __construct(private readonly bool $logsRequests = true)
+    {
+    }
+
+    public function logsRequests(): bool
+    {
+        return $this->logsRequests;
+    }
+
     public function log(string $event, array $context): void
     {
         $this->records[] = ['event' => $event, 'context' => $context];

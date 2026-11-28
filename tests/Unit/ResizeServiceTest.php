@@ -519,4 +519,59 @@ final class ResizeServiceTest extends TestCase
         $this->service(['max_input_megapixels' => 200])
             ->render($this->site . '/huge.jpg', $this->params(100), Format::Jpg);
     }
+
+    /**
+     * Политика анимации: конвертация, которая теряет кадры, не выполняется —
+     * сервис сообщает ошибку, а Application отдаёт оригинал.
+     */
+    public function testAnimatedGifRefusesWebpConversion(): void
+    {
+        $this->expectException(ProcessingException::class);
+        $this->expectExceptionMessage('without losing frames');
+        $this->service()->render($this->site . '/anim.gif', $this->params(4), Format::Webp);
+    }
+
+    public function testAnimatedGifRefusesPngConversion(): void
+    {
+        $this->expectException(ProcessingException::class);
+        $this->service()->render($this->site . '/anim.gif', $this->params(4), Format::Png);
+    }
+
+    /** Анимированный WebP: GD видит только первый кадр → отказ до декодирования. */
+    public function testAnimatedWebpIsRefused(): void
+    {
+        $path = $this->site . '/anim.webp';
+        // Контейнер RIFF с флагом анимации и чанком ANMF.
+        $payload = 'WEBP' . 'VP8X' . pack('V', 10) . "\x02" . str_repeat("\0", 9)
+            . 'ANMF' . pack('V', 8) . str_repeat("\0", 8);
+        file_put_contents($path, 'RIFF' . pack('V', strlen($payload)) . $payload);
+
+        $this->expectException(ProcessingException::class);
+        $this->expectExceptionMessage('Animated webp');
+        $this->service()->render($path, $this->params(4), Format::Webp);
+    }
+
+    public function testStaticWebpIsNotDetectedAsAnimated(): void
+    {
+        if (!function_exists('imagewebp')) {
+            self::markTestSkipped('GD WebP support is not available');
+        }
+        $bytes = $this->service()->render($this->site . '/static.gif', $this->params(4), Format::Webp);
+        self::assertSame('RIFF', substr($bytes, 0, 4));
+    }
+
+    public function testStaticGifConvertsFreely(): void
+    {
+        $bytes = $this->service()->render($this->site . '/static.gif', $this->params(4), Format::Gif);
+        self::assertSame('GIF', substr($bytes, 0, 3));
+    }
+
+    public function testStaticGifConvertsToWebpWhenAvailable(): void
+    {
+        if (!function_exists('imagewebp')) {
+            self::markTestSkipped('GD WebP support is not available');
+        }
+        $bytes = $this->service()->render($this->site . '/static.gif', $this->params(4), Format::Webp);
+        self::assertSame('RIFF', substr($bytes, 0, 4));
+    }
 }

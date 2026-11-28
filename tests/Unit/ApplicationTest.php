@@ -663,4 +663,142 @@ final class ApplicationTest extends TestCase
         self::assertSame(302, $sapi->status);
         self::assertSame('no-store', $sapi->headerValue('Cache-Control'));
     }
+
+    /**
+     * Политика производительности: размеры актуальной версии оригинала
+     * не вытесняют друг друга. Иначе страница с srcset перегенерировала бы
+     * кеш на каждый запрос.
+     */
+    public function testDifferentSizesOfCurrentVersionCoexist(): void
+    {
+        $app = $this->app();
+        $this->handle($app, ['w' => '100']);
+        $this->handle($app, ['w' => '200']);
+        $again = $this->handle($app, ['w' => '100']);
+
+        self::assertSame('hit', $again->headerValue('X-Iar-Cache'));
+        self::assertCount(2, glob($this->site . '/cache/photo__*') ?: []);
+    }
+
+    /** Смена оригинала удаляет устаревшие варианты всех размеров. */
+    public function testOriginalChangeRemovesStaleSizes(): void
+    {
+        $app = $this->app();
+        $this->handle($app, ['w' => '100']);
+        $this->handle($app, ['w' => '200']);
+
+        touch($this->site . '/photo.jpg', time() + 900);
+        clearstatcache();
+        $this->handle($app, ['w' => '100']);
+
+        $files = glob($this->site . '/cache/photo__*') ?: [];
+        self::assertCount(1, $files);
+        self::assertStringContainsString('100x0', basename($files[0]));
+    }
+
+    /** Горячий путь: заголовок показывает, что вариант взят из кеша. */
+    public function testCacheStatusHeader(): void
+    {
+        $app = $this->app();
+        self::assertSame('miss', $this->handle($app, ['w' => '100'])->headerValue('X-Iar-Cache'));
+        self::assertSame('hit', $this->handle($app, ['w' => '100'])->headerValue('X-Iar-Cache'));
+    }
+
+    /**
+     * Политика производительности: при наличии варианта оригинал не читается
+     * и не декодируется. Оригинал на 140 Мп (файл-заголовок) не должен
+     * ни замедлить, ни уронить запрос из кеша.
+     */
+    public function testCacheHitDoesNotTouchHugeOriginal(): void
+    {
+        $config = $this->config();
+        $cache = new CacheStore($config->cacheDir);
+        $resizer = new FakeResizer();
+        $app = new Application($config, $resizer, $cache, $this->logger);
+
+        // Прогреваем кеш для «огромного» оригинала обычным рендером.
+        $this->handle($app, ['name' => 'huge.jpg', 'w' => '100']);
+        self::assertSame(1, $resizer->calls);
+
+        $sapi = $this->handle($app, ['name' => 'huge.jpg', 'w' => '100']);
+
+        self::assertSame(200, $sapi->status);
+        self::assertSame('hit', $sapi->headerValue('X-Iar-Cache'));
+        self::assertSame(1, $resizer->calls);
+    }
+
+    /** Оригинал побитово испорчен, но вариант в кеше есть — отдаём вариант. */
+    public function testCacheHitSurvivesCorruptedOriginal(): void
+    {
+        $app = $this->app();
+        $this->handle($app, ['w' => '100']);
+
+        $mtime = (int) filemtime($this->site . '/photo.jpg');
+        file_put_contents($this->site . '/photo.jpg', 'broken bytes');
+        touch($this->site . '/photo.jpg', $mtime);
+        clearstatcache();
+
+        $sapi = $this->handle($app, ['w' => '100']);
+        self::assertSame(200, $sapi->status);
+        self::assertSame('hit', $sapi->headerValue('X-Iar-Cache'));
+    }
+
+    /** ETag выводится из ключа: он стабилен и меняется вместе с оригиналом. */
+    public function testEtagIsDerivedFromCacheKey(): void
+    {
+        $app = $this->app();
+        $first = $this->handle($app, ['w' => '100']);
+        $second = $this->handle($app, ['w' => '100']);
+        self::assertSame($first->headerValue('ETag'), $second->headerValue('ETag'));
+
+        touch($this->site . '/photo.jpg', time() + 500);
+        clearstatcache();
+        $third = $this->handle($app, ['w' => '100']);
+
+        self::assertNotSame($first->headerValue('ETag'), $third->headerValue('ETag'));
+    }
+
+    public function testDifferentSizesHaveDifferentEtags(): void
+    {
+        $app = $this->app();
+        $a = $this->handle($app, ['w' => '100']);
+        $b = $this->handle($app, ['w' => '200']);
+
+        self::assertNotSame($a->headerValue('ETag'), $b->headerValue('ETag'));
+    }
+
+    /** Выключенный лог: метрики не собираются вовсе. */
+    public function testDisabledLoggerCollectsNothing(): void
+    {
+        $config = $this->config();
+        $logger = new SpyLogger(false);
+        $app = new Application($config, new FakeResizer(), new CacheStore($config->cacheDir), $logger);
+
+        Factory::send($app->handle($this->request(['w' => '100'])));
+        Factory::send($app->handle($this->request(['w' => '100'])));
+
+        self::assertSame([], $logger->records);
+    }
+
+    /** Пустой результат обработки никогда не попадает в кеш: отдаём оригинал. */
+    public function testEmptyRenderFallsBackToOriginal(): void
+    {
+        $sapi = $this->handle($this->app([], new FakeResizer('')), ['w' => '100']);
+
+        self::assertSame(302, $sapi->status);
+        self::assertSame('/photo.jpg', $sapi->headerValue('Location'));
+        self::assertSame([], glob($this->site . '/cache/photo__100x0*') ?: []);
+    }
+
+    /** Политика анимации: неудачная конвертация → оригинал, картинка не пропадает. */
+    public function testFailedAnimationConversionFallsBackToOriginal(): void
+    {
+        $resizer = new FakeResizer();
+        $resizer->failure = 'Animated gif cannot be converted to webp without losing frames.';
+        $sapi = $this->handle($this->app([], $resizer), ['name' => 'anim.gif', 'fm' => 'webp']);
+
+        self::assertSame(302, $sapi->status);
+        self::assertSame('/anim.gif', $sapi->headerValue('Location'));
+        self::assertSame('no-store', $sapi->headerValue('Cache-Control'));
+    }
 }

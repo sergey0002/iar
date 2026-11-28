@@ -191,6 +191,9 @@ if ($command === 'build') {
     [$code, $lines] = iar_instrument((string) file_get_contents($root . '/index.php'), 'index.php');
     file_put_contents($covDir . '/index.php', $code);
     $executable['index.php'] = $lines;
+    [$code, $lines] = iar_instrument((string) file_get_contents($root . '/legacy.php'), 'legacy.php');
+    file_put_contents($covDir . '/legacy.php', $code);
+    $executable['legacy.php'] = $lines;
 
     copy($root . '/config.php', $covDir . '/config.php');
     copy($root . '/tools/coverage-collector.php', $covDir . '/collector.php');

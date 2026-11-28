@@ -40,6 +40,40 @@ jobs:
       - name: Integration tests (real HTTP through the built-in server)
         run: php tools/integration.php run
 
+  # Гарантия «работает на PHP 7+»: движок без зависимостей на всех версиях.
+  legacy:
+    name: Legacy engine PHP ${{ matrix.php }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['7.0', '7.1', '7.2', '7.3', '7.4', '8.0', '8.1', '8.2', '8.3', '8.4']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: gd
+          coverage: none
+          tools: none
+
+      - name: Lint dependency-free files on this PHP version
+        run: |
+          php -l index.php
+          php -l legacy.php
+          php -l tools/cache.php
+          php -l tests/legacy-compat.php
+
+      - name: Cross-version policy checks (no composer, no PHPUnit)
+        run: php tests/legacy-compat.php
+
+      - name: Cache CLI works on this PHP version
+        run: |
+          php tools/cache.php stats
+          php tools/cache.php clean --source=absent.jpg --dry-run
+
   # Портативный режим: ни composer, ни PHPUnit — только PHP.
   # Это сценарий продукта «положил папку и работает».
   portable:

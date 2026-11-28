@@ -217,4 +217,28 @@ final class ConfigTest extends TestCase
         $this->expectExceptionMessage('Local config must return an array');
         Config::load($dir . '/config.php');
     }
+
+    public function testLogLevelDefaultsToError(): void
+    {
+        self::assertSame('error', Factory::config($this->site)->logLevel);
+    }
+
+    public function testLogLevelAcceptsInfoAndDebug(): void
+    {
+        self::assertSame('info', Factory::config($this->site, ['log_level' => 'info'])->logLevel);
+        self::assertSame('debug', Factory::config($this->site, ['log_level' => 'debug'])->logLevel);
+    }
+
+    public function testInvalidLogLevelIsRejected(): void
+    {
+        $this->expectException(ConfigException::class);
+        $this->expectExceptionMessage('log_level');
+        Factory::config($this->site, ['log_level' => 'trace']);
+    }
+
+    public function testNonStringLogLevelIsRejected(): void
+    {
+        $this->expectException(ConfigException::class);
+        Factory::config($this->site, ['log_level' => 5]);
+    }
 }

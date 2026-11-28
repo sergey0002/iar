@@ -6,7 +6,7 @@ declare(strict_types=1);
  * Гейт покрытия: падает, если покрытие строк кода проекта < 100%.
  *
  * Использование: php tools/coverage-gate.php clover.xml [threshold]
- * Учитываются только src/** и index.php (вендор и тесты исключены).
+ * Учитываются только src/**, index.php и legacy.php (вендор и тесты исключены).
  */
 
 $path = $argv[1] ?? 'clover.xml';
@@ -29,7 +29,9 @@ $perFile = [];
 
 foreach ($xml->xpath('//file') ?: [] as $file) {
     $name = str_replace('\\', '/', (string) $file['name']);
-    $isProject = str_contains($name, '/src/') || str_ends_with($name, '/index.php');
+    $isProject = str_contains($name, '/src/')
+        || str_ends_with($name, '/index.php')
+        || str_ends_with($name, '/legacy.php');
     if (!$isProject || str_contains($name, '/vendor/') || str_contains($name, '/tests/')) {
         continue;
     }

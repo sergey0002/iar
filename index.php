@@ -16,13 +16,27 @@ declare(strict_types=1);
 // Тестовый шов для измерения покрытия; в production константа не определена.
 $iarAutoload = defined('IAR_AUTOLOAD') ? IAR_AUTOLOAD : __DIR__ . '/vendor/autoload.php';
 
-if (!is_file($iarAutoload)) {
-    // Зависимости не установлены: нейтральная ошибка вместо фатала с путями.
-    http_response_code(500);
-    header('Content-Type: text/plain; charset=UTF-8');
-    header('Cache-Control: no-store');
-    header('X-Content-Type-Options: nosniff');
-    echo "IAR dependencies are not installed. Run \"composer install\" in the IAR directory.\n";
+// Выбор движка (политика «работает на PHP 7+ и без зависимостей»):
+//   - PHP >= 8.1 и установленный Composer → основной движок (Intervention,
+//     AVIF, растеризация SVG через Imagick);
+//   - иначе → legacy.php: чистый GD, синтаксис PHP 7.0, ноль зависимостей.
+// Оба движка используют один и тот же URL API, один и тот же кеш и одну
+// и ту же политику заголовков, поэтому переключение незаметно для браузера.
+if (PHP_VERSION_ID < 80100 || !is_file($iarAutoload)) {
+    $iarLegacy = defined('IAR_LEGACY') ? IAR_LEGACY : __DIR__ . '/legacy.php';
+    if (!is_file($iarLegacy)) {
+        // Установка неполная: нейтральная ошибка вместо фатала с путями.
+        http_response_code(500);
+        header('Content-Type: text/plain; charset=UTF-8');
+        header('Cache-Control: no-store');
+        header('X-Content-Type-Options: nosniff');
+        echo "IAR installation is incomplete: legacy.php is missing.\n";
+
+        return;
+    }
+
+    require_once $iarLegacy;
+    iar_legacy_run($_GET, $_SERVER, defined('IAR_CONFIG') ? IAR_CONFIG : null);
 
     return;
 }

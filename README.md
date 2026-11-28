@@ -301,6 +301,7 @@ return [
 | `cache_key_config_hash` | bool | Include a fingerprint of quality settings in the cache key. |
 | `logging` | bool | Debug request log. **`false` by default.** |
 | `log_dir` | path | Directory for log files (one file per day). |
+| `log_level` | `error` / `info` / `debug` | `error` (default) — failures with a reason only; `info` — plus hit/miss; `debug` — plus request parameters. At `error` no metrics are collected, so the hot path does no extra disk calls. |
 
 ### Cache Mode Comparison
 
@@ -384,6 +385,18 @@ php tools/coverage-portable.php build
 php tests/coverage-run.php
 php tools/integration.php run
 php tools/coverage-portable.php report 100
+
+# Compatibility with PHP 7.0 … 8.4 (no composer, no PHPUnit)
+php tests/legacy-compat.php
+
+# Measure disk operations on a cache hit
+php tools/io-probe.php build
+php tools/integration.php setup 0 /tmp/iar-probe
+php tools/integration.php payload 0 0 /tmp/iar-probe "" probe > /tmp/p.json
+php tests/Integration/step.php /tmp/p.json   # MISS
+php tools/io-probe.php reset
+php tests/Integration/step.php /tmp/p.json   # HIT
+php tools/io-probe.php report
 ```
 
 With Composer the usual commands are available:
@@ -437,7 +450,22 @@ location ~ ^/iar/(config\.php|composer\.|src/|tests/|tools/|log/|vendor/|\.) {
 }
 ```
 
-### Wiping the cache
+### Clearing the cache — selectively, without wiping the folder
+
+```bash
+php tools/cache.php stats                      # files, weight, number of originals
+php tools/cache.php clean --source=photo.jpg   # every variant of one original
+php tools/cache.php clean --orphans            # variants of deleted originals
+php tools/cache.php clean --older-than=30d     # variants not created recently
+php tools/cache.php clean --max-size=500M      # oldest until the weight fits
+php tools/cache.php wipe                       # everything
+```
+
+Every command accepts `--dry-run`. The tool runs on PHP 7.0+ with no
+dependencies and never reads file contents: the variant name carries a hash
+of the original's relative path, so the search is targeted.
+
+A full flush is fine too:
 
 ```bash
 rm -rf /path/to/site/iar/cache/*
@@ -449,9 +477,11 @@ No warm-up is needed: the next request to a URL rebuilds the variant.
 
 | Symptom | Cause | Fix |
 | :--- | :--- | :--- |
-| `500` mentioning `composer install` | dependencies missing | run `composer install --no-dev -o` inside the folder |
+| `X-Iar-Engine: legacy` | PHP < 8.1 or no `vendor/` | expected: the dependency-free engine is serving; for the full one use PHP 8.1+ and `composer install --no-dev -o` |
+| `500 IAR installation is incomplete` | neither `vendor/` nor `legacy.php` present | unpack the whole IAR folder |
 | `500 Configuration error.` | bad `images_base_dir` or value type | check `config.php`; the error is intentionally explicit |
-| `302` to the original instead of a thumbnail | GD could not process the file | set `logging => true` and read `reason` in `log/` |
+| `302` to the original instead of a thumbnail (`X-Iar-Fallback: original`) | GD could not process the file, or conversion would drop animation frames | set `logging => true` and read `reason` in `log/` |
+| `X-Iar-Cache: miss` on every request | `disable_cache => true` or the original keeps changing | check the config and the original's mtime |
 | `413` | source exceeds `max_input_megapixels` / `max_input_bytes` | shrink the source or raise the limit |
 | Photo rotated incorrectly | `ext-exif` missing | install `php-exif` |
 | SVG not rasterized | `ext-imagick` missing | install `php-imagick` or serve SVG as is |
@@ -483,12 +513,30 @@ The URL API is unchanged: existing links keep working.
 
 | Component | Minimum | Recommended |
 | :--- | :---: | :---: |
-| PHP | ≥ 8.1 | 8.2+ |
+| PHP | **≥ 7.0** (`legacy.php` engine) | 8.1+ (full `src/` engine) |
 | PHP GD extension | ✅ Required | + WebP + AVIF support |
 | Apache `mod_rewrite` | — | ✅ For clean URLs |
 | `php-exif` | — | ✅ Correct JPEG orientation |
 | `php-imagick` | — | ✅ For SVG → raster |
-| Composer | — | ✅ Only to install dependencies |
+| Composer | **not required** | ✅ For the full engine (Intervention Image) |
+
+### Two engines — one URL API, one cache
+
+| | `legacy.php` | `src/` (Intervention) |
+| :--- | :--- | :--- |
+| Selected when | PHP 7.0–8.0 **or** no `vendor/` | PHP ≥ 8.1 with Composer installed |
+| Dependencies | none (GD only) | `intervention/image` |
+| Cache | **same directory, same file names** | **same directory, same file names** |
+| URL API, headers, ETag, 304 | identical | identical |
+| Animated GIF | original is served | resized with frames preserved; format change → original |
+| Animated WebP | original is served | original is served |
+| SVG → raster | requires `ext-imagick` | requires `ext-imagick` |
+| AVIF | if GD supports it | if GD supports it |
+
+Selection is automatic and invisible to the browser: cache file names match
+byte for byte (verified by `LegacyTest`), so upgrading from PHP 7 to PHP 8
+needs neither a cache flush nor new links. The engine that answered is
+reported in the `X-Iar-Engine` header.
 
 ---
 
@@ -499,6 +547,7 @@ The URL API is unchanged: existing links keep working.
 - [Project audit](docs/audit.md)
 - [Remediation plan](docs/remediation-plan.md)
 - [Implementation & test report](docs/implementation-report.md)
+- [Product policy audit](docs/policies-audit.md)
 
 ---
 

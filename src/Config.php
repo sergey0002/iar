@@ -46,6 +46,7 @@ final class Config
         public readonly string $cacheDir,
         public readonly string $logDir,
         public readonly bool $logging,
+        public readonly string $logLevel,
         public readonly int $maxInputMegapixels,
         public readonly int $maxInputBytes,
         public readonly bool $cacheKeyConfigHash,
@@ -110,6 +111,11 @@ final class Config
             throw new ConfigException('default_gravity is invalid.');
         }
 
+        $logLevel = self::string($raw, 'log_level', 'error');
+        if (!in_array($logLevel, ['error', 'info', 'debug'], true)) {
+            throw new ConfigException('log_level must be "error", "info" or "debug".');
+        }
+
         $invalidation = self::string($raw, 'cache_invalidation', 'mtime');
         if (!in_array($invalidation, ['mtime', 'off'], true)) {
             throw new ConfigException('cache_invalidation must be "mtime" or "off".');
@@ -139,6 +145,7 @@ final class Config
             cacheDir: self::path($raw, 'cache_dir', __DIR__ . '/../cache'),
             logDir: self::path($raw, 'log_dir', __DIR__ . '/../log'),
             logging: self::bool($raw, 'logging', false),
+            logLevel: $logLevel,
             maxInputMegapixels: self::positiveInt($raw, 'max_input_megapixels', 40),
             maxInputBytes: self::positiveInt($raw, 'max_input_bytes', 20000000),
             cacheKeyConfigHash: self::bool($raw, 'cache_key_config_hash', true),

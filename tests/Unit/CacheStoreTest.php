@@ -136,7 +136,7 @@ final class CacheStoreTest extends TestCase
         self::assertFileExists($this->store->pathFor('br[1]__100x0' . $marker . '2', 'jpg'));
     }
 
-    /** Аудит B-09: удаляются варианты ВСЕХ размеров, а не только текущего. */
+    /** Аудит B-09: устаревшие варианты ВСЕХ размеров, а не только текущего. */
     public function testCleanOldVersionsRemovesAllSizes(): void
     {
         $marker = '__hash_';
@@ -146,10 +146,28 @@ final class CacheStoreTest extends TestCase
         $keep = 'photo__100x0' . $marker . '2.jpg';
         $this->store->put($this->store->pathFor('photo__100x0' . $marker . '2', 'jpg'), 'new');
 
-        $removed = $this->store->cleanOldVersions('photo__', $marker, $keep);
+        $removed = $this->store->cleanOldVersions('photo__', $marker, $keep, '2.');
 
         self::assertSame(3, $removed);
         self::assertFileExists($this->dir . '/' . $keep);
+    }
+
+    /**
+     * Политика производительности: варианты актуальной версии разных размеров
+     * живут вместе — иначе srcset перегенерировал бы кеш на каждый запрос.
+     */
+    public function testCleanOldVersionsKeepsCurrentSizes(): void
+    {
+        $marker = '__hash_';
+        foreach (['photo__100x0', 'photo__200x0', 'photo__0x300'] as $stem) {
+            $this->store->put($this->store->pathFor($stem . $marker . '5_fp.', 'jpg'), 'current');
+            $this->store->put($this->store->pathFor($stem . $marker . '4_fp.', 'jpg'), 'stale');
+        }
+
+        $removed = $this->store->cleanOldVersions('photo__', $marker, 'photo__100x0' . $marker . '5_fp..jpg', '5_fp.');
+
+        self::assertSame(3, $removed);
+        self::assertCount(3, glob($this->dir . '/photo__*') ?: []);
     }
 
     public function testCleanOldVersionsKeepsUnrelatedFiles(): void

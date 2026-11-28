@@ -24,6 +24,11 @@ final class Fixtures
         self::truecolorPng($dir . '/wide.png');
 
         file_put_contents($dir . '/anim.gif', base64_decode(self::ANIM_GIF, true));
+        // Статический GIF: один кадр, палитра создана сразу (без конвертации).
+        $static = imagecreate(8, 6);
+        imagecolorallocate($static, 10, 120, 200);
+        imagegif($static, $dir . '/static.gif');
+        imagedestroy($static);
         file_put_contents($dir . '/exif.jpg', base64_decode(self::EXIF_JPEG, true));
         file_put_contents($dir . '/corrupt.jpg', '<?php echo "not an image"; ?>');
         file_put_contents($dir . '/secret.txt', 'do not serve me');

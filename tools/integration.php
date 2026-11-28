@@ -97,6 +97,7 @@ function it_payload(string $root, array $scenario, int $stepIndex, string $site,
     $config = it_config($scenario, $site);
     $entry = it_entry($root);
     $noAutoload = false;
+    $noLegacy = false;
 
     if ($action === 'wipe_cache') {
         it_remove($site . '/cache');
@@ -108,14 +109,25 @@ function it_payload(string $root, array $scenario, int $stepIndex, string $site,
         $config['jpeg_quality'] = 60;
         it_write_config($config, $site);
     } elseif ($action === 'break_vendor') {
-        // Копия точки входа в каталоге без vendor/ — проверяем диагностику.
+        // Папка IAR без vendor/: должен включиться движок без зависимостей.
         $dir = $site . '/no-vendor';
+        if (!is_dir($dir)) {
+            mkdir($dir, 0777, true);
+        }
+        copy($entry, $dir . '/index.php');
+        copy(dirname($entry) . '/legacy.php', $dir . '/legacy.php');
+        $entry = $dir . '/index.php';
+        $noAutoload = true;
+    } elseif ($action === 'break_engine') {
+        // Неполная установка: только index.php, без движков.
+        $dir = $site . '/broken';
         if (!is_dir($dir)) {
             mkdir($dir, 0777, true);
         }
         copy($entry, $dir . '/index.php');
         $entry = $dir . '/index.php';
         $noAutoload = true;
+        $noLegacy = true;
     }
 
     $get = $step['get'] ?? [];
@@ -138,6 +150,7 @@ function it_payload(string $root, array $scenario, int $stepIndex, string $site,
         'config' => $site . '/iar-config.php',
         'coverage' => it_cov_dir($root),
         'no_autoload' => $noAutoload,
+        'no_legacy' => $noLegacy,
         'url' => '/iar/index.php?' . http_build_query($get),
     ];
 }
@@ -398,10 +411,22 @@ if ($command === 'setup') {
 
 if ($command === 'payload') {
     $scenarios = it_scenarios($root);
-    echo (string) json_encode(
-        it_payload($root, $scenarios[(int) $argv[2]], (int) $argv[3], (string) $argv[4], (string) ($argv[5] ?? '')),
-        JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES,
-    );
+    $payload = it_payload($root, $scenarios[(int) $argv[2]], (int) $argv[3], (string) $argv[4], (string) ($argv[5] ?? ''));
+
+    // Режим замера ввода-вывода: запрос идёт через инструментированную копию.
+    if (($argv[6] ?? '') === 'probe') {
+        $probe = $root . '/.probe';
+        if (!is_file($probe . '/autoload.php')) {
+            echo "Run \"php tools/io-probe.php build\" first.\n";
+            exit(1);
+        }
+        $payload['entry'] = $probe . '/index.php';
+        $payload['coverage'] = null;
+        $payload['probe'] = $probe;
+        $payload['probe_trace'] = true;
+    }
+
+    echo (string) json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     exit(0);
 }
 

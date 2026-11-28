@@ -19,8 +19,19 @@ interface CacheStoreInterface
     /** @param resource|null $lock */
     public function releaseLock($lock): void;
 
-    /** Удаляет устаревшие варианты оригинала (все размеры). */
-    public function cleanOldVersions(string $filenamePrefix, string $hashMarker, string $keepBasename): int;
+    /**
+     * Удаляет устаревшие варианты оригинала — всех размеров, но только
+     * прошлых версий. Актуальные варианты разных размеров сохраняются:
+     * страница с srcset не должна перегенерировать кеш на каждый запрос.
+     *
+     * @param string $currentVersion суффикс актуальной версии ("{mtime}{fingerprint}.")
+     */
+    public function cleanOldVersions(
+        string $filenamePrefix,
+        string $hashMarker,
+        string $keepBasename,
+        string $currentVersion = '',
+    ): int;
 
     public function ensureDirectory(): void;
 

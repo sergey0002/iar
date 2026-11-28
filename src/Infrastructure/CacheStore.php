@@ -112,8 +112,12 @@ class CacheStore implements CacheStoreInterface
         @fclose($lock);
     }
 
-    public function cleanOldVersions(string $filenamePrefix, string $hashMarker, string $keepBasename): int
-    {
+    public function cleanOldVersions(
+        string $filenamePrefix,
+        string $hashMarker,
+        string $keepBasename,
+        string $currentVersion = '',
+    ): int {
         if (!is_dir($this->dir)) {
             return 0;
         }
@@ -132,6 +136,10 @@ class CacheStore implements CacheStoreInterface
                 continue;
             }
             if (!str_starts_with($entry, $filenamePrefix) || !str_contains($entry, $hashMarker)) {
+                continue;
+            }
+            // Варианты актуальной версии оригинала (любого размера) живы.
+            if ($currentVersion !== '' && str_contains($entry, $hashMarker . $currentVersion)) {
                 continue;
             }
 

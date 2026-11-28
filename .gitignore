@@ -17,6 +17,7 @@
 
 # Артефакты тестов и анализа
 /.cov/
+/.probe/
 /.phpunit.cache/
 /.php-cs-fixer.cache
 /clover.xml

@@ -120,33 +120,76 @@ final class BootstrapTest extends TestCase
         self::assertSame('', $sapi->body);
     }
 
-    /** Аудит S-03: некорректный конфиг → 500, а не отключение защиты. */
-    public function testInvalidConfigProducesInternalError(): void
+    /**
+     * Политика надёжности: сломанный конфиг не оставляет пользователя
+     * без картинки — отдаётся оригинал (проверка пути при этом не ослабляется).
+     */
+    public function testInvalidConfigFallsBackToOriginal(): void
     {
         $this->writeConfig(['images_base_dir' => $this->site . '/does-not-exist']);
         $sapi = $this->run(['w' => '120']);
 
-        self::assertSame(500, $sapi->status);
-        self::assertSame("Configuration error.\n", $sapi->body);
+        self::assertSame(200, $sapi->status);
+        self::assertSame('original', $sapi->headerValue('X-Iar-Fallback'));
+        self::assertSame('image/jpeg', $sapi->headerValue('Content-Type'));
         self::assertSame('no-store', $sapi->headerValue('Cache-Control'));
+        self::assertSame(file_get_contents($this->site . '/photo.jpg'), $sapi->body);
     }
 
-    public function testUnexpectedThrowableIsLoggedAndHidden(): void
+    public function testInvalidConfigWithoutOriginalIsNeutral500(): void
+    {
+        $this->writeConfig(['images_base_dir' => $this->site . '/does-not-exist']);
+        $sapi = $this->run(['name' => 'missing.jpg', 'w' => '120']);
+
+        self::assertSame(500, $sapi->status);
+        self::assertSame("Internal error.\n", $sapi->body);
+    }
+
+    public function testUnexpectedThrowableFallsBackToOriginalWithoutLeakingDetails(): void
     {
         file_put_contents($this->configFile, '<?php throw new RuntimeException("secret path /var/www");');
         $sapi = $this->run(['w' => '120']);
 
-        self::assertSame(500, $sapi->status);
-        self::assertSame("Internal error.\n", $sapi->body);
+        self::assertSame(200, $sapi->status);
+        self::assertSame('original', $sapi->headerValue('X-Iar-Fallback'));
         self::assertStringNotContainsString('secret path', $sapi->body);
     }
 
-    public function testLoggingEnabledWritesDebugLog(): void
+    /** Клиентские ошибки оригинал НЕ отдают: иначе обход белого списка. */
+    public function testForbiddenExtensionIsNotReplacedByOriginal(): void
+    {
+        $sapi = $this->run(['name' => 'secret.txt']);
+
+        self::assertSame(403, $sapi->status);
+        self::assertNull($sapi->headerValue('X-Iar-Fallback'));
+        self::assertStringNotContainsString('do not serve me', $sapi->body);
+    }
+
+    public function testLoggingAtInfoLevelWritesRequestEvents(): void
+    {
+        $this->writeConfig(['logging' => true, 'log_level' => 'info']);
+        $this->run(['w' => '120']);
+
+        self::assertFileExists($this->site . '/log/' . date('Y-m-d') . '.log');
+    }
+
+    public function testLoggingAtErrorLevelWritesNothingOnSuccess(): void
     {
         $this->writeConfig(['logging' => true]);
         $this->run(['w' => '120']);
 
-        self::assertFileExists($this->site . '/log/' . date('Y-m-d') . '.log');
+        self::assertDirectoryDoesNotExist($this->site . '/log');
+    }
+
+    public function testLoggingAtErrorLevelWritesFailureWithReason(): void
+    {
+        $this->writeConfig(['logging' => true, 'images_base_dir' => $this->site . '/nope']);
+        $this->run(['w' => '120']);
+
+        $content = (string) file_get_contents($this->site . '/log/' . date('Y-m-d') . '.log');
+        self::assertStringContainsString('"event":"fail"', $content);
+        self::assertStringContainsString('images_base_dir', $content);
+        self::assertStringContainsString('"stage":"bootstrap"', $content);
     }
 
     public function testLoggingDisabledWritesNothing(): void
@@ -229,5 +272,225 @@ final class BootstrapTest extends TestCase
 
         self::assertSame('', $sapi->body);
         self::assertSame([], $sapi->headers);
+    }
+
+    /** Фатальная ошибка (например OOM) — браузер всё равно получает оригинал. */
+    public function testFatalErrorServesTheOriginal(): void
+    {
+        $sapi = new TestSapi();
+
+        try {
+            Bootstrap::handleFatal(
+                $sapi,
+                ['type' => E_ERROR, 'message' => 'Allowed memory size exhausted'],
+                ['name' => 'photo.jpg'],
+                ['DOCUMENT_ROOT' => $this->site, 'SCRIPT_NAME' => '/iar/index.php', 'REQUEST_URI' => '/iar/photo.jpg?w=100'],
+            );
+        } catch (\App\Tests\Support\ExitCalled) {
+        }
+
+        self::assertSame(200, $sapi->status);
+        self::assertSame('original', $sapi->headerValue('X-Iar-Fallback'));
+        self::assertSame(file_get_contents($this->site . '/photo.jpg'), $sapi->body);
+    }
+
+    public function testFatalErrorWithoutOriginalIsNeutral500(): void
+    {
+        $sapi = new TestSapi();
+
+        try {
+            Bootstrap::handleFatal(
+                $sapi,
+                ['type' => E_ERROR, 'message' => 'boom'],
+                ['name' => 'missing.jpg'],
+                ['DOCUMENT_ROOT' => $this->site],
+            );
+        } catch (\App\Tests\Support\ExitCalled) {
+        }
+
+        self::assertSame(500, $sapi->status);
+        self::assertSame("Internal error.\n", $sapi->body);
+    }
+
+    public function testFatalFallbackRespectsHead(): void
+    {
+        $sapi = new TestSapi();
+
+        try {
+            Bootstrap::handleFatal(
+                $sapi,
+                ['type' => E_ERROR, 'message' => 'boom'],
+                ['name' => 'photo.jpg'],
+                ['DOCUMENT_ROOT' => $this->site],
+                true,
+            );
+        } catch (\App\Tests\Support\ExitCalled) {
+        }
+
+        self::assertSame(200, $sapi->status);
+        self::assertSame('', $sapi->body);
+    }
+
+    /** Аварийный путь не должен обходить белый список расширений. */
+    public function testOriginalFileRejectsNonImage(): void
+    {
+        self::assertNull(Bootstrap::originalFile(
+            ['name' => 'secret.txt'],
+            ['DOCUMENT_ROOT' => $this->site],
+        ));
+    }
+
+    public function testOriginalFileRejectsTraversal(): void
+    {
+        self::assertNull(Bootstrap::originalFile(
+            ['name' => '../../../etc/passwd'],
+            ['DOCUMENT_ROOT' => $this->site],
+        ));
+    }
+
+    public function testOriginalFileRejectsNullByte(): void
+    {
+        self::assertNull(Bootstrap::originalFile(
+            ['name' => "photo.jpg\0.txt"],
+            ['DOCUMENT_ROOT' => $this->site],
+        ));
+    }
+
+    public function testOriginalFileRejectsMissingAndDirectory(): void
+    {
+        self::assertNull(Bootstrap::originalFile(['name' => 'nope.jpg'], ['DOCUMENT_ROOT' => $this->site]));
+        self::assertNull(Bootstrap::originalFile(['name' => 'nested'], ['DOCUMENT_ROOT' => $this->site]));
+    }
+
+    public function testOriginalFileRejectsBadDocumentRoot(): void
+    {
+        self::assertNull(Bootstrap::originalFile(
+            ['name' => 'photo.jpg'],
+            ['DOCUMENT_ROOT' => $this->site . '/nope'],
+        ));
+    }
+
+    public function testOriginalFileWithoutName(): void
+    {
+        self::assertNull(Bootstrap::originalFile([], ['DOCUMENT_ROOT' => $this->site]));
+        self::assertNull(Bootstrap::originalFile(['name' => ['x']], ['DOCUMENT_ROOT' => $this->site]));
+    }
+
+    public function testOriginalFileFromUriPath(): void
+    {
+        $path = Bootstrap::originalFile(
+            ['name' => 'private.png'],
+            [
+                'DOCUMENT_ROOT' => $this->site,
+                'SCRIPT_NAME' => '/iar/index.php',
+                'REQUEST_URI' => '/iar/nested/www/photo.jpg?w=10',
+            ],
+        );
+
+        self::assertSame($this->site . '/nested/www/photo.jpg', $path);
+    }
+
+    public function testOriginalFileWithoutDocumentRootUsesParentOfIar(): void
+    {
+        // CLI-режим: DOCUMENT_ROOT отсутствует, корень берётся на уровень выше IAR.
+        self::assertNull(Bootstrap::originalFile(['name' => 'definitely-missing-file.jpg'], []));
+    }
+
+    public function testOriginalResponseForSvgAddsCsp(): void
+    {
+        $sapi = Factory::send(Bootstrap::originalResponse($this->site . '/icon.svg'));
+
+        self::assertSame('image/svg+xml', $sapi->headerValue('Content-Type'));
+        self::assertStringContainsString("default-src 'none'", (string) $sapi->headerValue('Content-Security-Policy'));
+        self::assertSame('no-store', $sapi->headerValue('Cache-Control'));
+    }
+
+    public function testOriginalResponseForUnknownExtension(): void
+    {
+        $file = $this->site . '/blob.bin';
+        file_put_contents($file, 'x');
+        $sapi = Factory::send(Bootstrap::originalResponse($file));
+
+        self::assertSame('application/octet-stream', $sapi->headerValue('Content-Type'));
+        self::assertSame('1', $sapi->headerValue('Content-Length'));
+    }
+
+    /** Конфиг не возвращает массив: аварийный логгер не падает. */
+    public function testNonArrayConfigStillServesOriginal(): void
+    {
+        $file = $this->site . '/bad-config.php';
+        file_put_contents($file, '<?php return 42;');
+        $sapi = new TestSapi();
+
+        try {
+            Bootstrap::run(
+                $sapi,
+                ['name' => 'photo.jpg'],
+                ['DOCUMENT_ROOT' => $this->site, 'REQUEST_URI' => '/iar/photo.jpg?w=10', 'SCRIPT_NAME' => '/iar/index.php'],
+                $file,
+            );
+        } catch (\App\Tests\Support\ExitCalled) {
+        }
+
+        self::assertSame(200, $sapi->status);
+        self::assertSame('original', $sapi->headerValue('X-Iar-Fallback'));
+    }
+
+    /** Невалидный конфиг + config.local.php: настройки лога берутся из обоих. */
+    public function testEmergencyLoggerMergesLocalConfig(): void
+    {
+        $dir = $this->site . '/iar';
+        mkdir($dir);
+        file_put_contents($dir . '/config.php', '<?php return ["images_base_dir" => "/definitely/missing", "logging" => true];');
+        file_put_contents($dir . '/config.local.php', '<?php return ["log_dir" => "' . $this->site . '/local-log"];');
+        $sapi = new TestSapi();
+
+        try {
+            Bootstrap::run(
+                $sapi,
+                ['name' => 'photo.jpg'],
+                ['DOCUMENT_ROOT' => $this->site, 'REQUEST_URI' => '/iar/photo.jpg', 'SCRIPT_NAME' => '/iar/index.php'],
+                $dir . '/config.php',
+            );
+        } catch (\App\Tests\Support\ExitCalled) {
+        }
+
+        $logs = glob($this->site . '/local-log/*.log') ?: [];
+        self::assertCount(1, $logs);
+        $record = json_decode(trim((string) file_get_contents($logs[0])), true);
+        self::assertSame('fail', $record['event']);
+        self::assertSame('bootstrap', $record['stage']);
+    }
+
+    /** Локальный конфиг не массив — аварийный логгер это переживает. */
+    public function testEmergencyLoggerToleratesNonArrayLocalConfig(): void
+    {
+        $dir = $this->site . '/iar2';
+        mkdir($dir);
+        file_put_contents($dir . '/config.php', '<?php return ["images_base_dir" => "/definitely/missing"];');
+        file_put_contents($dir . '/config.local.php', '<?php return "nope";');
+        $sapi = new TestSapi();
+
+        try {
+            Bootstrap::run($sapi, ['name' => 'photo.jpg'], ['DOCUMENT_ROOT' => $this->site], $dir . '/config.php');
+        } catch (\App\Tests\Support\ExitCalled) {
+        }
+
+        self::assertSame(200, $sapi->status);
+    }
+
+    /** Скрипт в корне сайта: имя берётся из полного пути URI. */
+    public function testOriginalFileWithScriptInDocumentRoot(): void
+    {
+        $path = Bootstrap::originalFile(
+            [],
+            [
+                'DOCUMENT_ROOT' => $this->site,
+                'SCRIPT_NAME' => '/index.php',
+                'REQUEST_URI' => '/photo.jpg?w=10',
+            ],
+        );
+
+        self::assertSame($this->site . '/photo.jpg', $path);
     }
 }

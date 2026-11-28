@@ -137,13 +137,33 @@ return [
         ]),
     ]),
 
-    $scenario('animated gif keeps its format', [
+    $scenario('animated gif keeps its format and frames', [
         $step(['name' => 'anim.gif', 'w' => '4'], [
             'status' => 200,
             'headers' => ['Content-Type' => 'image/gif'],
             'body_contains' => 'GIF89a',
             'headers_absent' => ['Vary'],
         ], ['HTTP_ACCEPT' => 'image/avif,image/webp,*/*']),
+    ]),
+
+    $scenario('animated gif refuses lossy format conversion', [
+        $step(['name' => 'anim.gif', 'w' => '4', 'fm' => 'webp'], [
+            'status' => 302,
+            'headers' => [
+                'Location' => '/anim.gif',
+                'Cache-Control' => 'no-store',
+                'X-Iar-Fallback' => 'original',
+            ],
+        ]),
+    ]),
+
+    $scenario('static gif is converted normally', [
+        $step(['name' => 'static.gif', 'w' => '4'], [
+            'status' => 200,
+            'headers' => ['Content-Type' => 'image/gif'],
+            'body_contains' => 'GIF8',
+            'image_size' => [4, 3],
+        ]),
     ]),
 
     $scenario('webp negotiation by Accept header', [
@@ -346,13 +366,23 @@ return [
         ]),
     ]),
 
-    $scenario('logging enabled writes one json line per request', [
+    $scenario('logging at info level writes one json line per request', [
         $step(['name' => 'photo.jpg', 'w' => '100'], [
             'status' => 200,
             'log_dir_exists' => true,
             'log_lines' => 1,
+            'log_contains' => '"event":"miss"',
         ]),
-    ], ['logging' => true]),
+    ], ['logging' => true, 'log_level' => 'info']),
+
+    $scenario('logging at error level stays silent on success', [
+        $step(['name' => 'photo.jpg', 'w' => '100'], ['status' => 200]),
+        $step(['name' => 'photo.jpg', 'w' => '100'], [
+            'status' => 200,
+            'headers' => ['X-Iar-Cache' => 'hit'],
+            'log_dir_exists' => false,
+        ]),
+    ], ['logging' => true, 'log_level' => 'error']),
 
     $scenario('corrupt source falls back to the original', [
         $step(['name' => 'corrupt.jpg', 'w' => '100'], [
@@ -363,10 +393,19 @@ return [
         ]),
     ], ['logging' => true]),
 
-    $scenario('missing dependencies produce a neutral error', [
-        $step(['name' => 'photo.jpg'], [
+    $scenario('incomplete installation yields a neutral error', [
+        $step(['name' => 'photo.jpg', 'w' => '100'], [
             'status' => 500,
-            'body_contains' => 'composer install',
+            'body_contains' => 'installation is incomplete',
+            'body_not_contains' => '/www',
+        ], [], 'break_engine'),
+    ]),
+
+    $scenario('missing dependencies switch to the dependency-free engine', [
+        $step(['name' => 'photo.jpg', 'w' => '100'], [
+            'status' => 200,
+            'headers' => ['Content-Type' => 'image/jpeg', 'X-Iar-Engine' => 'legacy'],
+            'image_size' => [100, 67],
             'body_not_contains' => '/www',
         ], [], 'break_vendor'),
     ]),
